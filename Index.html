@@ -1,0 +1,1904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EquipHer — Your Learning Space</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+  const SUPABASE_URL = 'https://miffjpwvtuezpwszilqa.supabase.co';
+  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1pZmZqcHd2dHVlenB3c3ppbHFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA3ODUsImV4cCI6MjA5NTkxNjc4NX0.sX5McTNlcafHoYsVALNGL5zFP6-58uPbhE7RzGo_AyQ';
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  // ── Expose supabase globally so inline handlers can reach it ──
+  window.sb = supabase;
+  window.currentUser = null;
+  window.currentProfile = null;
+  window.currentLesson = null;
+  window.reflectionStep = 1;
+  window.totalSteps = 5;
+  window.generatedQuestions = [];
+
+  // ══════════════════════════════════════
+  // AUTH
+  // ══════════════════════════════════════
+  window.doLogin = async function() {
+    const email = document.getElementById('login-email').value.trim();
+    const pass  = document.getElementById('login-pass').value;
+    if (!email || !pass) { showToast('Please enter your email and password'); return; }
+
+    setLoading('login-btn', true);
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
+    setLoading('login-btn', false);
+
+    if (error) { showToast('❌ ' + error.message); return; }
+    await loadProfile(data.user);
+  };
+
+  window.doRegister = async function() {
+    const name  = document.getElementById('reg-name').value.trim();
+    const email = document.getElementById('reg-email').value.trim();
+    const pass  = document.getElementById('reg-pass').value;
+    const role  = window.selectedRole || 'girl';
+
+    if (!name || !email || !pass) { showToast('Please fill in all fields'); return; }
+    if (pass.length < 6) { showToast('Password must be at least 6 characters'); return; }
+
+    setLoading('reg-btn', true);
+    const { data, error } = await supabase.auth.signUp({ email, password: pass });
+    setLoading('reg-btn', false);
+
+    if (error) { showToast('❌ ' + error.message); return; }
+
+    // Create profile
+    const { error: profileError } = await supabase.from('profiles').insert({
+      id: data.user.id,
+      name,
+      role,
+      streak_count: 0,
+      current_lesson: 1
+    });
+
+    if (profileError) { showToast('Account created! Please sign in.'); showLoginForm(); return; }
+    await loadProfile(data.user);
+  };
+
+  window.doLogout = async function() {
+    await supabase.auth.signOut();
+    window.currentUser = null;
+    window.currentProfile = null;
+    document.getElementById('screen-dashboard').classList.remove('active');
+    document.getElementById('screen-login').classList.add('active');
+    showToast('Signed out successfully');
+  };
+
+  async function loadProfile(user) {
+    window.currentUser = user;
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+
+    if (error || !profile) {
+      showToast('Could not load your profile. Please try again.');
+      return;
+    }
+
+    window.currentProfile = profile;
+    enterDashboard(profile);
+  }
+
+  // ── Check existing session on page load ──
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (session) {
+      loadProfile(session.user);
+    }
+  });
+
+  // ══════════════════════════════════════
+  // DASHBOARD ENTRY
+  // ══════════════════════════════════════
+  async function enterDashboard(profile) {
+    // Set UI
+    document.getElementById('screen-login').classList.remove('active');
+    document.getElementById('screen-dashboard').classList.add('active');
+
+    const initials = profile.name ? profile.name.charAt(0).toUpperCase() : '?';
+    document.getElementById('user-avatar').textContent = initials;
+    document.getElementById('user-name-display').textContent = profile.name;
+
+    // Load current lesson
+    await loadCurrentLesson(profile.current_lesson || 1);
+    document.getElementById('user-role-display').textContent =
+      `Week ${Math.ceil((profile.current_lesson || 1) / 4)} · Lesson ${profile.current_lesson || 1}`;
+
+    // Load streak
+    document.getElementById('streak-num').textContent = '🔥 ' + (profile.streak_count || 0);
+
+    // Update welcome strip
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+    document.getElementById('welcome-greeting').innerHTML =
+      `${greeting},<br><strong>${profile.name} ✨</strong>`;
+
+    startCountdown();
+    await loadBadges();
+    await loadMessages();
+    showPanel('home', null);
+  }
+
+  // ══════════════════════════════════════
+  // LESSONS
+  // ══════════════════════════════════════
+  async function loadCurrentLesson(lessonNum) {
+    const { data: lesson, error } = await supabase
+      .from('lessons')
+      .select('*')
+      .eq('lesson_number', lessonNum)
+      .eq('is_published', true)
+      .single();
+
+    if (error || !lesson) {
+      // No published lesson yet — show placeholder
+      document.getElementById('next-lesson-badge').textContent = `LESSON ${lessonNum} · COMING SOON`;
+      document.getElementById('next-lesson-title').textContent = 'Your next lesson is being prepared';
+      document.getElementById('next-lesson-desc').textContent = 'Coach Irene is uploading your next lesson. Check back soon!';
+      document.getElementById('start-lesson-btn').style.display = 'none';
+      return;
+    }
+
+    window.currentLesson = lesson;
+    document.getElementById('next-lesson-badge').textContent = `LESSON ${lesson.lesson_number} · THIS WEEK`;
+    document.getElementById('next-lesson-title').textContent = lesson.title;
+    document.getElementById('next-lesson-desc').textContent = lesson.subtitle || '';
+    document.getElementById('start-lesson-btn').style.display = 'inline-flex';
+
+    // Update progress bar
+    const pct = Math.round(((lessonNum - 1) / 52) * 100);
+    document.getElementById('progress-bar-fill').style.width = pct + '%';
+    document.getElementById('progress-label').textContent = `Lesson ${lessonNum - 1} of 52 complete`;
+  }
+
+  // ══════════════════════════════════════
+  // REFLECTION FLOW
+  // ══════════════════════════════════════
+  window.startReflection = function() {
+    if (!window.currentLesson) {
+      showToast('No lesson available yet. Check back soon!');
+      return;
+    }
+    const questions = window.currentLesson.questions;
+    if (!questions || !questions.length) {
+      showToast('Reflection questions are being set up for this lesson.');
+      return;
+    }
+    window.generatedQuestions = questions;
+    window.reflectionStep = 1;
+    window.totalSteps = questions.length;
+    window.reflectionAnswers = {};
+    renderReflectionQuestion();
+    showPanel('reflection', null);
+  };
+
+  function renderReflectionQuestion() {
+    const q = window.generatedQuestions[window.reflectionStep - 1];
+    const dots = document.querySelectorAll('.ref-dot');
+    dots.forEach((dot, i) => {
+      dot.className = 'ref-dot';
+      if (i < window.reflectionStep - 1) dot.classList.add('done');
+      else if (i === window.reflectionStep - 1) dot.classList.add('active');
+    });
+
+    // Rebuild dots if needed
+    const prog = document.getElementById('ref-progress');
+    prog.innerHTML = '';
+    for (let i = 0; i < window.totalSteps; i++) {
+      const d = document.createElement('div');
+      d.className = 'ref-dot' + (i < window.reflectionStep - 1 ? ' done' : i === window.reflectionStep - 1 ? ' active' : '');
+      prog.appendChild(d);
+    }
+
+    document.querySelector('.q-number').textContent = `Question ${window.reflectionStep} of ${window.totalSteps}`;
+    document.querySelector('.q-text').innerHTML = q.text || q;
+    document.getElementById('reflection-answer').value = '';
+    document.getElementById('char-count').textContent = '0 characters';
+
+    const btn = document.querySelector('.next-btn');
+    btn.textContent = window.reflectionStep === window.totalSteps ? 'Submit & Get Feedback ✦' : 'Next Question →';
+
+    // Show/hide the question card and feedback
+    document.getElementById('reflection-question-card').style.display = 'block';
+    document.getElementById('ai-feedback-section').style.display = 'none';
+    document.getElementById('irene-box').style.display = 'none';
+  }
+
+  window.submitReflection = async function() {
+    const answer = document.getElementById('reflection-answer').value.trim();
+    if (answer.length < 10) {
+      showToast('✍️ Take a moment to write something real — even a few lines.');
+      return;
+    }
+
+    window.reflectionAnswers[window.reflectionStep] = answer;
+
+    if (window.reflectionStep < window.totalSteps) {
+      window.reflectionStep++;
+      renderReflectionQuestion();
+    } else {
+      await saveAndShowFeedback();
+    }
+  };
+
+  async function saveAndShowFeedback() {
+    document.getElementById('reflection-question-card').style.display = 'none';
+    document.getElementById('ai-feedback-section').style.display = 'block';
+    document.getElementById('ai-feedback-content').innerHTML = `
+      <div class="typing-indicator">
+        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      </div>`;
+
+    // Save reflection to Supabase
+    const { data: reflection, error: refError } = await supabase
+      .from('reflections')
+      .insert({
+        girl_id: window.currentUser.id,
+        lesson_id: window.currentLesson.id,
+        answers: window.reflectionAnswers
+      })
+      .select()
+      .single();
+
+    // Get AI feedback
+    const rubric = window.currentLesson.rubric || {};
+    const lastAnswer = window.reflectionAnswers[window.totalSteps];
+
+    const systemPrompt = `You are the EquipHer AI Reflection Coach for a programme led by Coach Irene that equips girls aged 15–21 with wisdom about relationships, self-awareness, and preparing well for their future. The programme runs within a Christian and African cultural context.
+
+LESSON: "${window.currentLesson.title}"
+LESSON DESCRIPTION: "${window.currentLesson.subtitle || ''}"
+
+FEEDBACK RUBRIC:
+- Shallow answer looks like: ${rubric.shallow || 'surface-level, vague responses'}
+- Deep answer looks like: ${rubric.deep || 'honest, specific, personally connected responses'}
+- Feedback focus: ${rubric.feedback_focus || 'affirm self-awareness and encourage growth'}
+
+YOUR ROLE: Give warm, affirming, personalised feedback like a wise older sister. Be specific. Reference what she actually wrote. Connect her answer to what was taught. End with one question or gentle challenge. Under 200 words. No bullet points.`;
+
+    const allAnswers = Object.entries(window.reflectionAnswers)
+      .map(([num, ans]) => `Q${num}: ${ans}`).join('\n\n');
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `Her reflection answers:\n\n${allAnswers}` }]
+        })
+      });
+
+      const aiData = await response.json();
+      const feedbackText = aiData.content?.[0]?.text || 'Your reflection was beautifully honest. Keep going. 💜';
+
+      // Save feedback to Supabase
+      if (reflection) {
+        await supabase.from('ai_feedback').insert({
+          reflection_id: reflection.id,
+          feedback_text: feedbackText
+        });
+      }
+
+      document.getElementById('ai-feedback-content').innerHTML =
+        `<div class="ai-feedback-text">${feedbackText.replace(/\n\n/g, '<br><br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</div>`;
+
+    } catch (err) {
+      document.getElementById('ai-feedback-content').innerHTML =
+        `<div class="ai-feedback-text">Your honesty in this reflection is exactly what growth looks like. Coach Irene will have more for you soon. 💜</div>`;
+    }
+
+    // Update streak
+    await supabase.from('profiles')
+      .update({ streak_count: (window.currentProfile.streak_count || 0) + 1 })
+      .eq('id', window.currentUser.id);
+
+    document.getElementById('irene-box').style.display = 'block';
+    await checkAndAwardBadges();
+  }
+
+  // ══════════════════════════════════════
+  // MESSAGES
+  // ══════════════════════════════════════
+  window.sendToIrene = async function() {
+    const msg = document.getElementById('irene-message').value.trim();
+    if (!msg) { showToast('Please write something first'); return; }
+
+    const { error } = await supabase.from('messages').insert({
+      girl_id: window.currentUser.id,
+      message: msg,
+      lesson_number: window.currentLesson?.lesson_number || null
+    });
+
+    if (error) { showToast('❌ Could not send. Please try again.'); return; }
+    document.getElementById('irene-message').value = '';
+    showToast('💌 Sent to Coach Irene!');
+  };
+
+  window.sendAskIrene = async function() {
+    const msg = document.getElementById('ask-irene-input').value.trim();
+    if (!msg) { showToast('Please write something first'); return; }
+
+    const { error } = await supabase.from('messages').insert({
+      girl_id: window.currentUser.id,
+      message: msg
+    });
+
+    if (error) { showToast('❌ Could not send. Please try again.'); return; }
+    document.getElementById('ask-irene-input').value = '';
+    showToast('💌 Sent to Coach Irene — she will respond soon!');
+    await loadMessages();
+  };
+
+  async function loadMessages() {
+    const { data: messages } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('girl_id', window.currentUser.id)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (!messages || !messages.length) return;
+
+    const container = document.getElementById('messages-list');
+    if (!container) return;
+    container.innerHTML = '';
+
+    messages.forEach(m => {
+      container.innerHTML += `
+        <div style="background:var(--cream); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:12px;">
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">${new Date(m.created_at).toLocaleDateString('en-GB', {day:'numeric',month:'short'})}</div>
+          <div style="font-size:14px; line-height:1.7; color:var(--charcoal); border-left:3px solid var(--rose-light); padding-left:12px; margin-bottom:${m.reply ? '12px' : '0'};">${m.message}</div>
+          ${m.reply ? `<div style="font-size:13px; line-height:1.7; color:var(--soft-green); background:rgba(122,158,138,0.07); border-radius:8px; padding:12px; margin-top:8px;"><strong style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; display:block; margin-bottom:4px;">💌 Coach Irene replied:</strong>${m.reply}</div>` : '<div style="font-size:12px; color:var(--muted); font-style:italic;">Awaiting reply from Coach Irene...</div>'}
+        </div>`;
+    });
+
+    // Show unread count if any reply
+    const hasReplies = messages.some(m => m.reply);
+    if (hasReplies) {
+      document.getElementById('messages-card-title').textContent = 'You have replies waiting';
+    }
+  }
+
+  // ══════════════════════════════════════
+  // BADGES
+  // ══════════════════════════════════════
+  async function loadBadges() {
+    const { data: earned } = await supabase
+      .from('badges')
+      .select('badge_name')
+      .eq('girl_id', window.currentUser.id);
+
+    const earnedNames = (earned || []).map(b => b.badge_name);
+    window.earnedBadges = earnedNames;
+
+    const allBadges = document.querySelectorAll('.badge-card');
+    allBadges.forEach(card => {
+      const name = card.dataset.badge;
+      if (!earnedNames.includes(name)) {
+        card.classList.add('locked');
+        const btn = card.querySelector('.badge-download');
+        if (btn) { btn.disabled = true; btn.textContent = '🔒 Locked'; }
+      } else {
+        card.classList.remove('locked');
+      }
+    });
+  }
+
+  async function checkAndAwardBadges() {
+    const profile = window.currentProfile;
+    const toAward = [];
+
+    // First Steps — first reflection
+    const { count: refCount } = await supabase
+      .from('reflections')
+      .select('*', { count: 'exact', head: true })
+      .eq('girl_id', window.currentUser.id);
+
+    if (refCount >= 1 && !window.earnedBadges?.includes('First Steps')) {
+      toAward.push('First Steps');
+    }
+    if (refCount >= 10 && !window.earnedBadges?.includes('Reflective Heart')) {
+      toAward.push('Reflective Heart');
+    }
+    if ((profile.streak_count || 0) >= 7 && !window.earnedBadges?.includes('On Fire')) {
+      toAward.push('On Fire');
+    }
+
+    for (const badge of toAward) {
+      await supabase.from('badges').insert({ girl_id: window.currentUser.id, badge_name: badge });
+      showToast(`🏅 You just earned the "${badge}" badge!`);
+    }
+
+    if (toAward.length) await loadBadges();
+  }
+
+  window.downloadBadge = function(name) {
+    if (window.earnedBadges && !window.earnedBadges.includes(name)) {
+      showToast('Complete more lessons to unlock this badge!');
+      return;
+    }
+    showToast(`⬇ Downloading "${name}" badge — ready to share!`);
+  };
+
+  // ══════════════════════════════════════
+  // CHALLENGE SUBMISSION
+  // ══════════════════════════════════════
+  window.triggerUpload = function() { document.getElementById('file-upload').click(); };
+
+  window.handleUpload = function(input) {
+    if (input.files && input.files[0]) {
+      window.challengeFile = input.files[0];
+      const zone = document.getElementById('upload-zone');
+      zone.innerHTML = `<div class="upload-icon">✅</div><h4>Photo ready: ${input.files[0].name}</h4><p>Your selfie will be uploaded when you submit</p>`;
+      zone.style.borderColor = 'var(--soft-green)';
+    }
+  };
+
+  window.submitChallenge = async function() {
+    const report = document.querySelector('#panel-challenge .reflection-textarea')?.value?.trim();
+    if (!report && !window.challengeFile) {
+      showToast('Please write your report or upload a photo first');
+      return;
+    }
+
+    let photoUrl = null;
+
+    // Upload photo if provided
+    if (window.challengeFile) {
+      const fileName = `${window.currentUser.id}/${Date.now()}-${window.challengeFile.name}`;
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('equipher-uploads')
+        .upload(fileName, window.challengeFile);
+
+      if (!uploadError) {
+        const { data: urlData } = supabase.storage
+          .from('equipher-uploads')
+          .getPublicUrl(fileName);
+        photoUrl = urlData.publicUrl;
+      }
+    }
+
+    const { error } = await supabase.from('challenges').insert({
+      girl_id: window.currentUser.id,
+      lesson_id: window.currentLesson?.id || null,
+      report_text: report || null,
+      photo_url: photoUrl
+    });
+
+    if (error) { showToast('❌ Could not submit. Please try again.'); return; }
+
+    showToast('🎯 Challenge submitted! You just unlocked the Bold Speaker badge!');
+    await supabase.from('badges').upsert({
+      girl_id: window.currentUser.id,
+      badge_name: 'Bold Speaker'
+    });
+    await loadBadges();
+    window.challengeFile = null;
+  };
+
+  // ══════════════════════════════════════
+  // LIVE SESSION
+  // ══════════════════════════════════════
+  window.submitLiveQuestion = async function() {
+    const q = document.getElementById('live-question-input').value.trim();
+    if (!q) { showToast('Please write your question first'); return; }
+
+    const { error } = await supabase.from('messages').insert({
+      girl_id: window.currentUser.id,
+      message: `[LIVE SESSION QUESTION] ${q}`
+    });
+
+    if (error) { showToast('❌ Could not submit. Please try again.'); return; }
+    document.getElementById('live-question-input').value = '';
+    showToast('✅ Question submitted for the live session!');
+  };
+
+  // ══════════════════════════════════════
+  // UI HELPERS
+  // ══════════════════════════════════════
+  window.showPanel = function(panelId, navEl) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + panelId).classList.add('active');
+
+    if (navEl) {
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      navEl.classList.add('active');
+    }
+
+    const titles = {
+      home: 'My Dashboard', reflection: "Today's Reflection",
+      challenge: 'My Challenge', badges: 'My Badges',
+      live: 'Live Sessions', ask: 'Ask Coach Irene'
+    };
+    document.getElementById('panel-title').textContent = titles[panelId] || 'EquipHer';
+  };
+
+  window.showLoginForm = function() {
+    document.getElementById('login-form').style.display = 'block';
+    document.getElementById('register-form').style.display = 'none';
+  };
+
+  window.showRegisterForm = function() {
+    document.getElementById('login-form').style.display = 'none';
+    document.getElementById('register-form').style.display = 'block';
+  };
+
+  window.setRole = function(el, role) {
+    document.querySelectorAll('.role-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    window.selectedRole = role;
+  };
+
+  window.updateCharCount = function(el) {
+    document.getElementById('char-count').textContent = el.value.length + ' characters';
+  };
+
+  function setLoading(btnId, loading) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.textContent = loading ? 'Please wait...' : btn.dataset.label;
+  }
+
+  window.showModal = function(id) { document.getElementById(id).classList.add('open'); };
+  window.closeModal = function(id) { document.getElementById(id).classList.remove('open'); };
+
+  window.showToast = function(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3500);
+  };
+
+  function getNextThirdThursday() {
+    const now = new Date();
+    let year = now.getFullYear(), month = now.getMonth();
+    function thirdThursday(y, m) {
+      let count = 0;
+      for (let d = 1; d <= 31; d++) {
+        const date = new Date(y, m, d);
+        if (date.getMonth() !== m) break;
+        if (date.getDay() === 4 && ++count === 3) return new Date(y, m, d, 18, 0, 0);
+      }
+    }
+    let target = thirdThursday(year, month);
+    if (target <= now) {
+      month++; if (month > 11) { month = 0; year++; }
+      target = thirdThursday(year, month);
+    }
+    return target;
+  }
+
+  window.startCountdown = function() {
+    const target = getNextThirdThursday();
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const dateStr = `${target.getDate()} ${months[target.getMonth()]} · 6:00 PM`;
+    const liveEl = document.getElementById('live-date-display');
+    if (liveEl) liveEl.textContent = `Next live: ${dateStr}`;
+    const liveEl2 = document.getElementById('live-session-date');
+    if (liveEl2) liveEl2.textContent = `Thursday, ${target.getDate()} ${months[target.getMonth()]} ${target.getFullYear()} · 6:00 PM WAT`;
+
+    function update() {
+      const diff = target - new Date();
+      if (diff <= 0) return;
+      const days = Math.floor(diff / 86400000);
+      const hours = Math.floor((diff % 86400000) / 3600000);
+      const mins = Math.floor((diff % 3600000) / 60000);
+      const secs = Math.floor((diff % 60000) / 1000);
+      const el = (id) => document.getElementById(id);
+      if (el('cd-days')) {
+        el('cd-days').textContent = String(days).padStart(2,'0');
+        el('cd-hours').textContent = String(hours).padStart(2,'0');
+        el('cd-mins').textContent = String(mins).padStart(2,'0');
+        el('cd-secs').textContent = String(secs).padStart(2,'0');
+      }
+    }
+    update();
+    setInterval(update, 1000);
+  };
+
+  // Close modals on overlay click
+  document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('open');
+    });
+  });
+
+  window.selectedRole = 'girl';
+</script>
+<style>
+  :root {
+    --rose: #C4726A; --rose-light: #E8A89E; --rose-dark: #8B4A44;
+    --cream: #FAF6F1; --warm-white: #FDF9F5; --gold: #C9A96E;
+    --charcoal: #2C2420; --muted: #8A7570; --soft-green: #7A9E8A;
+    --lavender: #9B8FB5; --border: rgba(196,114,106,0.15);
+    --shadow: 0 8px 40px rgba(44,36,32,0.08);
+    --shadow-deep: 0 20px 60px rgba(44,36,32,0.15);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; background:var(--cream); color:var(--charcoal); min-height:100vh; overflow-x:hidden; }
+  .screen { display:none; min-height:100vh; }
+  .screen.active { display:flex; }
+
+  /* LOGIN */
+  #screen-login { flex-direction:column; align-items:center; justify-content:center; background:linear-gradient(145deg,#FAF6F1 0%,#F5EDE6 40%,#EDE0D8 100%); position:relative; overflow:hidden; }
+  #screen-login::before { content:''; position:absolute; width:600px; height:600px; border-radius:50%; background:radial-gradient(circle,rgba(196,114,106,0.12) 0%,transparent 70%); top:-200px; right:-200px; animation:breathe 6s ease-in-out infinite; }
+  @keyframes breathe { 0%,100%{transform:scale(1);opacity:.8} 50%{transform:scale(1.1);opacity:1} }
+  @keyframes slideUp { from{opacity:0;transform:translateY(30px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes spin-slow { from{transform:translateY(-50%) rotate(0deg)} to{transform:translateY(-50%) rotate(360deg)} }
+  @keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
+  @keyframes typingBounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-8px)} }
+
+  .login-card { background:rgba(253,249,245,.95); backdrop-filter:blur(20px); border:1px solid rgba(196,114,106,.2); border-radius:28px; padding:52px 48px; width:420px; max-width:90vw; box-shadow:var(--shadow-deep); position:relative; z-index:2; animation:slideUp .6s ease forwards; }
+  .brand-mark { display:flex; align-items:center; gap:12px; margin-bottom:32px; }
+  .brand-icon { width:44px; height:44px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:20px; }
+  .brand-name { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:600; color:var(--charcoal); letter-spacing:-.5px; }
+  .brand-name span { color:var(--rose); }
+  .login-greeting { font-family:'Cormorant Garamond',serif; font-size:32px; font-weight:300; line-height:1.2; margin-bottom:8px; }
+  .login-sub { font-size:14px; color:var(--muted); margin-bottom:32px; font-weight:300; }
+  .role-tabs { display:flex; gap:8px; margin-bottom:24px; background:rgba(196,114,106,.07); padding:5px; border-radius:12px; }
+  .role-tab { flex:1; padding:10px; border:none; border-radius:9px; cursor:pointer; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:500; background:transparent; color:var(--muted); transition:all .2s; }
+  .role-tab.active { background:white; color:var(--rose-dark); box-shadow:0 2px 8px rgba(44,36,32,.08); }
+  .field-group { margin-bottom:18px; }
+  .field-label { font-size:12px; font-weight:500; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:8px; display:block; }
+  .field-input { width:100%; padding:14px 18px; border:1.5px solid var(--border); border-radius:12px; font-family:'DM Sans',sans-serif; font-size:15px; color:var(--charcoal); background:var(--warm-white); outline:none; transition:border-color .2s,box-shadow .2s; }
+  .field-input:focus { border-color:var(--rose-light); box-shadow:0 0 0 3px rgba(196,114,106,.1); }
+  .btn-primary { width:100%; padding:16px; background:linear-gradient(135deg,var(--rose) 0%,var(--rose-dark) 100%); color:white; border:none; border-radius:12px; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:500; cursor:pointer; transition:transform .15s,box-shadow .15s; margin-top:8px; }
+  .btn-primary:hover { transform:translateY(-1px); box-shadow:0 8px 24px rgba(196,114,106,.35); }
+  .btn-primary:disabled { opacity:.7; cursor:not-allowed; transform:none; }
+  .switch-link { text-align:center; margin-top:20px; font-size:13px; color:var(--muted); }
+  .switch-link span { color:var(--rose); cursor:pointer; font-weight:500; }
+
+  /* DASHBOARD */
+  #screen-dashboard { flex-direction:row; }
+  .sidebar { width:260px; background:var(--charcoal); display:flex; flex-direction:column; padding:32px 0; position:fixed; height:100vh; z-index:100; overflow-y:auto; }
+  .sidebar-brand { padding:0 24px 32px; border-bottom:1px solid rgba(255,255,255,.07); }
+  .sidebar-brand .brand-name { color:white; font-size:24px; }
+  .sidebar-brand .brand-name span { color:var(--rose-light); }
+  .sidebar-user { padding:24px; border-bottom:1px solid rgba(255,255,255,.07); }
+  .user-avatar { width:48px; height:48px; background:linear-gradient(135deg,var(--rose-light),var(--gold)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; color:white; margin-bottom:10px; }
+  .user-name { font-size:14px; font-weight:500; color:white; margin-bottom:2px; }
+  .user-role { font-size:12px; color:rgba(255,255,255,.4); }
+  .sidebar-nav { padding:24px 12px; flex:1; }
+  .nav-section-label { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:rgba(255,255,255,.3); padding:0 12px; margin-bottom:8px; margin-top:20px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px; cursor:pointer; transition:all .15s; font-size:13.5px; font-weight:400; color:rgba(255,255,255,.55); margin-bottom:2px; border:none; background:none; width:100%; text-align:left; }
+  .nav-item:hover { background:rgba(255,255,255,.06); color:rgba(255,255,255,.85); }
+  .nav-item.active { background:rgba(196,114,106,.2); color:var(--rose-light); font-weight:500; }
+  .nav-icon { font-size:16px; width:20px; text-align:center; }
+  .streak-badge { margin:0 12px; padding:16px; background:linear-gradient(135deg,rgba(201,169,110,.15),rgba(196,114,106,.1)); border:1px solid rgba(201,169,110,.2); border-radius:14px; }
+  .streak-badge .streak-num { font-family:'Cormorant Garamond',serif; font-size:36px; font-weight:600; color:var(--gold); line-height:1; }
+  .streak-badge .streak-label { font-size:11px; color:rgba(255,255,255,.4); margin-top:4px; }
+  .main-content { margin-left:260px; flex:1; min-height:100vh; background:var(--cream); }
+  .top-bar { background:var(--warm-white); border-bottom:1px solid var(--border); padding:18px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:50; }
+  .top-bar-title { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; color:var(--charcoal); }
+  .top-bar-actions { display:flex; gap:12px; align-items:center; }
+  .live-badge { display:flex; align-items:center; gap:6px; background:rgba(122,158,138,.12); border:1px solid rgba(122,158,138,.3); color:var(--soft-green); padding:7px 14px; border-radius:20px; font-size:12px; font-weight:500; cursor:pointer; transition:all .2s; }
+  .live-badge:hover { background:rgba(122,158,138,.2); }
+  .live-dot { width:7px; height:7px; background:var(--soft-green); border-radius:50%; animation:pulse-dot 2s ease-in-out infinite; }
+  .logout-btn { padding:7px 14px; border:1px solid rgba(255,255,255,.15); border-radius:20px; background:transparent; color:rgba(255,255,255,.5); font-size:12px; cursor:pointer; font-family:'DM Sans',sans-serif; transition:all .2s; margin:12px; }
+  .logout-btn:hover { background:rgba(255,255,255,.08); color:white; }
+
+  /* PANELS */
+  .panel { display:none; padding:40px; animation:fadeIn .3s ease; }
+  .panel.active { display:block; }
+  .welcome-strip { background:linear-gradient(135deg,var(--rose-dark) 0%,var(--rose) 50%,var(--rose-light) 100%); border-radius:24px; padding:40px 48px; color:white; margin-bottom:32px; position:relative; overflow:hidden; }
+  .welcome-strip::before { content:'✦'; position:absolute; right:48px; top:50%; transform:translateY(-50%); font-size:80px; opacity:.12; animation:spin-slow 20s linear infinite; }
+  .welcome-strip h2 { font-family:'Cormorant Garamond',serif; font-size:36px; font-weight:300; line-height:1.2; margin-bottom:8px; }
+  .welcome-strip p { font-size:15px; opacity:.85; font-weight:300; }
+  .progress-strip { display:flex; align-items:center; gap:16px; margin-top:24px; }
+  .progress-bar-bg { flex:1; height:6px; background:rgba(255,255,255,.25); border-radius:10px; overflow:hidden; }
+  .progress-bar-fill { height:100%; background:white; border-radius:10px; width:0%; transition:width 1s ease; }
+  .progress-label { font-size:13px; opacity:.85; white-space:nowrap; }
+  .dashboard-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:32px; }
+  .card { background:var(--warm-white); border:1px solid var(--border); border-radius:20px; padding:28px; transition:box-shadow .2s; }
+  .card:hover { box-shadow:var(--shadow); }
+  .card-label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
+  .card-title { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; color:var(--charcoal); line-height:1.3; margin-bottom:8px; }
+  .card-sub { font-size:13px; color:var(--muted); font-weight:300; line-height:1.5; }
+  .next-session-card { background:var(--warm-white); border:1px solid var(--border); border-radius:20px; padding:28px; display:flex; gap:24px; align-items:flex-start; margin-bottom:20px; }
+  .session-thumb { width:140px; height:90px; background:linear-gradient(135deg,var(--rose-dark),var(--charcoal)); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:28px; flex-shrink:0; cursor:pointer; transition:transform .15s; }
+  .session-thumb:hover { transform:scale(1.03); }
+  .session-info { flex:1; }
+  .session-badge { display:inline-block; background:rgba(196,114,106,.1); color:var(--rose); font-size:11px; font-weight:500; padding:4px 10px; border-radius:20px; margin-bottom:10px; letter-spacing:.05em; }
+  .session-title { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; margin-bottom:6px; }
+  .session-desc { font-size:13px; color:var(--muted); line-height:1.6; font-weight:300; }
+  .live-reminder { background:linear-gradient(135deg,rgba(122,158,138,.08),rgba(155,143,181,.08)); border:1px solid rgba(122,158,138,.25); border-radius:16px; padding:20px 24px; display:flex; align-items:center; gap:16px; }
+  .live-reminder .icon { font-size:28px; }
+  .live-reminder h4 { font-size:14px; font-weight:600; color:var(--charcoal); margin-bottom:3px; }
+  .live-reminder p { font-size:12px; color:var(--muted); }
+  .btn-outline { display:inline-flex; align-items:center; gap:6px; padding:10px 20px; border:1.5px solid var(--rose); color:var(--rose); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:500; cursor:pointer; background:transparent; transition:all .15s; margin-top:16px; }
+  .btn-outline:hover { background:var(--rose); color:white; }
+  .btn-ghost { margin-left:auto; padding:8px 18px; border:1.5px solid rgba(122,158,138,.4); color:var(--soft-green); border-radius:10px; font-size:12px; font-weight:500; cursor:pointer; background:transparent; white-space:nowrap; transition:all .15s; font-family:'DM Sans',sans-serif; }
+  .btn-ghost:hover { background:rgba(122,158,138,.1); }
+  .btn-sm { padding:10px 20px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:500; cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px; margin-top:16px; }
+  .btn-sm:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(196,114,106,.3); }
+
+  /* REFLECTION */
+  .reflection-container { max-width:680px; margin:0 auto; }
+  .reflection-progress { display:flex; gap:6px; margin-bottom:36px; }
+  .ref-dot { height:4px; border-radius:10px; background:var(--border); transition:all .3s; flex:1; }
+  .ref-dot.done { background:var(--rose); }
+  .ref-dot.active { background:var(--rose-light); }
+  .reflection-card { background:var(--warm-white); border:1px solid var(--border); border-radius:24px; padding:48px; margin-bottom:20px; }
+  .q-number { font-size:12px; font-weight:500; letter-spacing:.1em; text-transform:uppercase; color:var(--rose-light); margin-bottom:12px; }
+  .q-text { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:400; line-height:1.4; color:var(--charcoal); margin-bottom:28px; }
+  .q-text em { color:var(--rose); font-style:italic; }
+  .reflection-textarea { width:100%; min-height:140px; padding:20px; border:1.5px solid var(--border); border-radius:14px; font-family:'DM Sans',sans-serif; font-size:15px; line-height:1.7; color:var(--charcoal); background:var(--cream); resize:vertical; outline:none; transition:border-color .2s; }
+  .reflection-textarea:focus { border-color:var(--rose-light); }
+  .reflection-actions { display:flex; justify-content:space-between; align-items:center; margin-top:20px; }
+  .char-count { font-size:12px; color:var(--muted); }
+  .next-btn { display:flex; align-items:center; gap:8px; padding:14px 28px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); color:white; border:none; border-radius:12px; font-family:'DM Sans',sans-serif; font-size:14px; font-weight:500; cursor:pointer; transition:all .15s; }
+  .next-btn:hover { transform:translateY(-1px); box-shadow:0 8px 20px rgba(196,114,106,.3); }
+  .ai-feedback-card { background:linear-gradient(135deg,rgba(196,114,106,.05),rgba(201,169,110,.05)); border:1px solid rgba(196,114,106,.2); border-radius:24px; padding:40px; margin-bottom:20px; animation:slideUp .5s ease; }
+  .ai-feedback-header { display:flex; align-items:center; gap:12px; margin-bottom:20px; }
+  .ai-avatar { width:40px; height:40px; background:linear-gradient(135deg,var(--rose),var(--gold)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .ai-label { font-size:12px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--rose); }
+  .ai-feedback-text { font-size:15px; line-height:1.8; color:var(--charcoal); font-weight:300; }
+  .ai-feedback-text strong { font-weight:600; color:var(--rose-dark); }
+  .typing-indicator { display:flex; gap:4px; align-items:center; padding:10px 0; }
+  .typing-dot { width:8px; height:8px; background:var(--rose-light); border-radius:50%; animation:typingBounce 1.2s ease-in-out infinite; }
+  .typing-dot:nth-child(2) { animation-delay:.2s; }
+  .typing-dot:nth-child(3) { animation-delay:.4s; }
+  .irene-box { background:var(--warm-white); border:1px solid var(--border); border-radius:16px; padding:24px; margin-top:20px; }
+  .irene-box h4 { font-family:'Cormorant Garamond',serif; font-size:18px; font-weight:600; margin-bottom:8px; }
+  .irene-box p { font-size:13px; color:var(--muted); margin-bottom:14px; font-weight:300; line-height:1.6; }
+  .irene-textarea { width:100%; min-height:90px; padding:14px 16px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; line-height:1.6; color:var(--charcoal); background:var(--cream); resize:none; outline:none; transition:border-color .2s; }
+  .irene-textarea:focus { border-color:var(--rose-light); }
+
+  /* BADGES */
+  .badges-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:20px; }
+  .badge-card { background:var(--warm-white); border:1px solid var(--border); border-radius:20px; padding:32px 24px; text-align:center; transition:all .2s; }
+  .badge-card:hover { box-shadow:var(--shadow); transform:translateY(-2px); }
+  .badge-card.locked { opacity:.5; filter:grayscale(.8); }
+  .badge-icon { font-size:48px; margin-bottom:16px; }
+  .badge-name { font-family:'Cormorant Garamond',serif; font-size:17px; font-weight:600; margin-bottom:6px; }
+  .badge-desc { font-size:12px; color:var(--muted); line-height:1.5; margin-bottom:16px; }
+  .badge-download { padding:8px 18px; border:1.5px solid var(--gold); color:var(--gold); border-radius:10px; font-size:12px; font-weight:500; cursor:pointer; background:transparent; font-family:'DM Sans',sans-serif; transition:all .15s; }
+  .badge-download:hover { background:var(--gold); color:white; }
+  .badge-download:disabled { border-color:var(--border); color:var(--muted); cursor:not-allowed; }
+
+  /* CHALLENGE */
+  .challenge-card { background:var(--warm-white); border:1px solid var(--border); border-radius:24px; padding:40px; max-width:680px; margin:0 auto 24px; }
+  .challenge-tag { display:inline-block; background:rgba(155,143,181,.12); color:var(--lavender); font-size:11px; font-weight:600; padding:5px 12px; border-radius:20px; letter-spacing:.08em; text-transform:uppercase; margin-bottom:16px; }
+  .challenge-title { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:600; line-height:1.3; margin-bottom:16px; }
+  .challenge-instructions { font-size:14px; line-height:1.8; color:var(--muted); margin-bottom:28px; font-weight:300; }
+  .challenge-steps { list-style:none; margin-bottom:28px; }
+  .challenge-steps li { display:flex; gap:14px; align-items:flex-start; padding:14px 0; border-bottom:1px solid var(--border); font-size:14px; line-height:1.6; }
+  .challenge-steps li:last-child { border-bottom:none; }
+  .step-num { width:26px; height:26px; background:rgba(196,114,106,.1); color:var(--rose); border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex-shrink:0; margin-top:2px; }
+  .upload-zone { border:2px dashed rgba(196,114,106,.25); border-radius:16px; padding:40px; text-align:center; cursor:pointer; transition:all .2s; background:rgba(196,114,106,.02); }
+  .upload-zone:hover { border-color:var(--rose-light); background:rgba(196,114,106,.05); }
+  .upload-zone .upload-icon { font-size:32px; margin-bottom:12px; }
+  .upload-zone h4 { font-size:15px; font-weight:500; margin-bottom:6px; }
+  .upload-zone p { font-size:13px; color:var(--muted); }
+
+  /* LIVE */
+  .live-card { background:var(--warm-white); border:1px solid var(--border); border-radius:24px; padding:40px; max-width:680px; margin:0 auto; }
+  .countdown-grid { display:flex; gap:16px; margin:28px 0; }
+  .countdown-unit { flex:1; background:var(--cream); border:1px solid var(--border); border-radius:14px; padding:20px 12px; text-align:center; }
+  .countdown-num { font-family:'Cormorant Garamond',serif; font-size:40px; font-weight:600; color:var(--rose); line-height:1; }
+  .countdown-unit-label { font-size:11px; color:var(--muted); margin-top:6px; letter-spacing:.06em; }
+
+  /* MODAL */
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(44,36,32,.6); backdrop-filter:blur(4px); z-index:1000; align-items:center; justify-content:center; }
+  .modal-overlay.open { display:flex; }
+  .modal { background:var(--warm-white); border-radius:24px; padding:40px; max-width:520px; width:90%; animation:slideUp .3s ease; }
+  .modal h3 { font-family:'Cormorant Garamond',serif; font-size:26px; font-weight:600; margin-bottom:12px; }
+  .modal p { font-size:14px; color:var(--muted); line-height:1.7; margin-bottom:20px; }
+  .modal-actions { display:flex; gap:12px; justify-content:flex-end; }
+  .btn-close { padding:12px 24px; border:1.5px solid var(--border); border-radius:10px; background:transparent; color:var(--muted); font-family:'DM Sans',sans-serif; font-size:14px; cursor:pointer; }
+  .section-header { margin-bottom:28px; }
+  .section-header h2 { font-family:'Cormorant Garamond',serif; font-size:32px; font-weight:600; margin-bottom:6px; }
+  .section-header p { font-size:14px; color:var(--muted); font-weight:300; }
+  .toast { position:fixed; bottom:32px; right:32px; background:var(--charcoal); color:white; padding:14px 22px; border-radius:12px; font-size:13px; z-index:9999; box-shadow:var(--shadow-deep); transform:translateY(80px); opacity:0; transition:all .3s ease; }
+  .toast.show { transform:translateY(0); opacity:1; }
+  @media(max-width:768px) { .sidebar{width:0;overflow:hidden} .main-content{margin-left:0} .dashboard-grid{grid-template-columns:1fr} .panel{padding:20px} }
+</style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="screen-login" class="screen active">
+  <div class="login-card">
+    <div class="brand-mark">
+      <div class="brand-icon">✦</div>
+      <div class="brand-name">Equip<span>Her</span></div>
+    </div>
+
+    <!-- LOGIN FORM -->
+    <div id="login-form">
+      <div class="login-greeting">Welcome back,<br><strong>beautiful learner</strong></div>
+      <div class="login-sub">Your journey of wisdom continues here.</div>
+      <div class="field-group">
+        <label class="field-label">Email Address</label>
+        <input type="email" class="field-input" id="login-email" placeholder="your@email.com">
+      </div>
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <input type="password" class="field-input" id="login-pass" placeholder="••••••••"
+          onkeydown="if(event.key==='Enter') doLogin()">
+      </div>
+      <button class="btn-primary" id="login-btn" data-label="Sign In →" onclick="doLogin()">Sign In →</button>
+      <div class="switch-link">New to EquipHer? <span onclick="showRegisterForm()">Create an account</span></div>
+    </div>
+
+    <!-- REGISTER FORM -->
+    <div id="register-form" style="display:none;">
+      <div class="login-greeting">Join<br><strong>EquipHer ✦</strong></div>
+      <div class="login-sub">Create your account to begin your journey.</div>
+      <div class="role-tabs">
+        <button class="role-tab active" onclick="setRole(this,'girl')">👧 I'm a Girl</button>
+        <button class="role-tab" onclick="setRole(this,'mom')">👩 I'm a Mom</button>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Your Name</label>
+        <input type="text" class="field-input" id="reg-name" placeholder="Your first name">
+      </div>
+      <div class="field-group">
+        <label class="field-label">Email Address</label>
+        <input type="email" class="field-input" id="reg-email" placeholder="your@email.com">
+      </div>
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <input type="password" class="field-input" id="reg-pass" placeholder="At least 6 characters">
+      </div>
+      <button class="btn-primary" id="reg-btn" data-label="Create My Account →" onclick="doRegister()">Create My Account →</button>
+      <div class="switch-link">Already have an account? <span onclick="showLoginForm()">Sign in</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="screen-dashboard" class="screen">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark" style="margin-bottom:0;">
+        <div class="brand-icon">✦</div>
+        <div class="brand-name">Equip<span>Her</span></div>
+      </div>
+    </div>
+    <div class="sidebar-user">
+      <div class="user-avatar" id="user-avatar">A</div>
+      <div class="user-name" id="user-name-display">Loading...</div>
+      <div class="user-role" id="user-role-display">EquipHer</div>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section-label">My Learning</div>
+      <button class="nav-item active" onclick="showPanel('home',this)"><span class="nav-icon">🏠</span> My Dashboard</button>
+      <button class="nav-item" onclick="startReflection(); showPanel('reflection',this)"><span class="nav-icon">📝</span> Today's Reflection</button>
+      <button class="nav-item" onclick="showPanel('challenge',this)"><span class="nav-icon">🎯</span> My Challenge</button>
+      <button class="nav-item" onclick="showPanel('badges',this)"><span class="nav-icon">🏅</span> My Badges</button>
+      <div class="nav-section-label">Community</div>
+      <button class="nav-item" onclick="showPanel('live',this)"><span class="nav-icon">📡</span> Live Sessions</button>
+      <button class="nav-item" onclick="showPanel('ask',this)"><span class="nav-icon">💌</span> Ask Coach Irene</button>
+    </nav>
+    <div class="streak-badge" style="margin-bottom:8px;">
+      <div class="streak-num" id="streak-num">🔥 0</div>
+      <div class="streak-label">Day streak — keep going!</div>
+    </div>
+    <button class="logout-btn" onclick="doLogout()">Sign Out</button>
+  </aside>
+
+  <main class="main-content">
+    <div class="top-bar">
+      <div class="top-bar-title" id="panel-title">My Dashboard</div>
+      <div class="top-bar-actions">
+        <div class="live-badge" onclick="showPanel('live',null)">
+          <div class="live-dot"></div>
+          <span id="live-date-display">Next live session</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- HOME -->
+    <div class="panel active" id="panel-home">
+      <div class="welcome-strip">
+        <h2 id="welcome-greeting">Welcome ✨</h2>
+        <p>You're doing beautifully. Today's lesson is waiting for you.</p>
+        <div class="progress-strip">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-bar-fill"></div></div>
+          <div class="progress-label" id="progress-label">Loading...</div>
+        </div>
+      </div>
+      <div class="next-session-card">
+        <div class="session-thumb" onclick="startReflection(); showPanel('reflection',null)">▶️</div>
+        <div class="session-info">
+          <div class="session-badge" id="next-lesson-badge">LOADING...</div>
+          <div class="session-title" id="next-lesson-title">Loading your next lesson...</div>
+          <div class="session-desc" id="next-lesson-desc"></div>
+          <button class="btn-sm" id="start-lesson-btn" onclick="startReflection(); showPanel('reflection',null)" style="display:none;">▶ Start Lesson + Reflection</button>
+        </div>
+      </div>
+      <div class="dashboard-grid">
+        <div class="card">
+          <div class="card-label">🎯 Active Challenge</div>
+          <div class="card-title">The Conversation Dare</div>
+          <div class="card-sub">Pick one girlfriend and have a real talk about standards. Come back and tell us how it went.</div>
+          <button class="btn-outline" onclick="showPanel('challenge',null)">Go to My Challenge →</button>
+        </div>
+        <div class="card">
+          <div class="card-label">🏅 Badges</div>
+          <div class="card-title">Your Achievements</div>
+          <div class="card-sub">Complete lessons and challenges to earn badges you can download and share.</div>
+          <button class="btn-outline" onclick="showPanel('badges',null)">View All Badges →</button>
+        </div>
+        <div class="card">
+          <div class="card-label">💌 Ask Coach Irene</div>
+          <div class="card-title" id="messages-card-title">Send a private message</div>
+          <div class="card-sub">Something on your heart? Coach Irene reads every message personally.</div>
+          <button class="btn-sm" onclick="showPanel('ask',null)">Message Coach Irene →</button>
+        </div>
+        <div class="card">
+          <div class="card-label">📡 Live Session</div>
+          <div class="card-title">Monthly with Coach Irene</div>
+          <div class="card-sub">Every 3rd Thursday at 6PM. Come with your questions — she's waiting for you.</div>
+          <button class="btn-outline" onclick="showPanel('live',null)">View Details →</button>
+        </div>
+      </div>
+      <div class="live-reminder">
+        <div class="icon">📡</div>
+        <div>
+          <h4 id="live-reminder-date">Next Live Session</h4>
+          <p>Monthly group session with Coach Irene. All EquipHer girls are invited.</p>
+        </div>
+        <button class="btn-ghost" onclick="showModal('live-modal')">Add to Calendar</button>
+      </div>
+    </div>
+
+    <!-- REFLECTION -->
+    <div class="panel" id="panel-reflection">
+      <div class="reflection-container">
+        <div class="section-header">
+          <h2>Lesson Reflection</h2>
+          <p>Answer honestly. There are no wrong answers — only real ones.</p>
+        </div>
+        <div class="reflection-progress" id="ref-progress"></div>
+        <div class="reflection-card" id="reflection-question-card">
+          <div class="q-number">Question 1</div>
+          <div class="q-text">Loading question...</div>
+          <textarea class="reflection-textarea" id="reflection-answer" placeholder="Take your time. Write as much or as little as feels right..." oninput="updateCharCount(this)"></textarea>
+          <div class="reflection-actions">
+            <div class="char-count" id="char-count">0 characters</div>
+            <button class="next-btn" onclick="submitReflection()">Next Question →</button>
+          </div>
+        </div>
+        <div class="ai-feedback-card" id="ai-feedback-section" style="display:none;">
+          <div class="ai-feedback-header">
+            <div class="ai-avatar">✦</div>
+            <div>
+              <div class="ai-label">EquipHer AI Reflection Coach</div>
+              <div style="font-size:12px;color:var(--muted);margin-top:2px;">Personalised feedback based on this lesson</div>
+            </div>
+          </div>
+          <div id="ai-feedback-content"></div>
+        </div>
+        <div class="irene-box" id="irene-box" style="display:none;">
+          <h4>💌 Anything you'd like Coach Irene to know?</h4>
+          <p>A question, a thought, something that stayed with you — she reads these personally.</p>
+          <textarea class="irene-textarea" id="irene-message" placeholder="Type here... this goes straight to Coach Irene."></textarea>
+          <button class="btn-sm" style="margin-top:12px;" onclick="sendToIrene()">Send to Coach Irene ✦</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CHALLENGE -->
+    <div class="panel" id="panel-challenge">
+      <div class="challenge-card">
+        <div class="challenge-tag">🎯 Real-World Challenge</div>
+        <div class="challenge-title">The Conversation Dare</div>
+        <div class="challenge-instructions">Every lesson must become a doing. Pick one girlfriend and take what you've learned off the screen into real life.</div>
+        <ol class="challenge-steps">
+          <li><div class="step-num">1</div><div>Pick <strong>one girlfriend</strong> you trust.</div></li>
+          <li><div class="step-num">2</div><div>Have an honest conversation about <strong>what she looks for in a relationship</strong> and what her standards are.</div></li>
+          <li><div class="step-num">3</div><div>Write down what you noticed and what surprised you.</div></li>
+          <li><div class="step-num">4</div><div><strong>Take a selfie of your notes</strong> and upload it below — or type your report.</div></li>
+        </ol>
+        <div class="upload-zone" id="upload-zone" onclick="triggerUpload()">
+          <div class="upload-icon">📸</div>
+          <h4>Upload your worksheet selfie</h4>
+          <p>Tap to take a photo or upload from your gallery</p>
+          <input type="file" id="file-upload" accept="image/*" style="display:none;" onchange="handleUpload(this)">
+        </div>
+        <div style="margin-top:20px;">
+          <label class="field-label">Or type your challenge report</label>
+          <textarea class="reflection-textarea" placeholder="Who did you talk to? How do you know her? What happened?..." style="min-height:120px;"></textarea>
+        </div>
+        <button class="btn-sm" style="width:100%;justify-content:center;margin-top:16px;padding:16px;" onclick="submitChallenge()">Submit My Challenge Report ✦</button>
+      </div>
+    </div>
+
+    <!-- BADGES -->
+    <div class="panel" id="panel-badges">
+      <div class="section-header">
+        <h2>My Badges</h2>
+        <p>Download any earned badge and share on Instagram or WhatsApp.</p>
+      </div>
+      <div class="badges-grid">
+        <div class="badge-card locked" data-badge="First Steps">
+          <div class="badge-icon">🌱</div>
+          <div class="badge-name">First Steps</div>
+          <div class="badge-desc">Complete your first lesson reflection</div>
+          <button class="badge-download" onclick="downloadBadge('First Steps')">⬇ Download & Share</button>
+        </div>
+        <div class="badge-card locked" data-badge="Reflective Heart">
+          <div class="badge-icon">💜</div>
+          <div class="badge-name">Reflective Heart</div>
+          <div class="badge-desc">Complete 10 deep reflection sessions</div>
+          <button class="badge-download" onclick="downloadBadge('Reflective Heart')">⬇ Download & Share</button>
+        </div>
+        <div class="badge-card locked" data-badge="On Fire">
+          <div class="badge-icon">🔥</div>
+          <div class="badge-name">On Fire</div>
+          <div class="badge-desc">Achieve a 7-day learning streak</div>
+          <button class="badge-download" onclick="downloadBadge('On Fire')">⬇ Download & Share</button>
+        </div>
+        <div class="badge-card locked" data-badge="Bold Speaker">
+          <div class="badge-icon">🗣️</div>
+          <div class="badge-name">Bold Speaker</div>
+          <div class="badge-desc">Complete The Conversation Dare</div>
+          <button class="badge-download" onclick="downloadBadge('Bold Speaker')">⬇ Download & Share</button>
+        </div>
+        <div class="badge-card locked" data-badge="Halfway Home">
+          <div class="badge-icon">⭐</div>
+          <div class="badge-name">Halfway Home</div>
+          <div class="badge-desc">Complete 26 of 52 lessons</div>
+          <button class="badge-download" onclick="downloadBadge('Halfway Home')">⬇ Download & Share</button>
+        </div>
+        <div class="badge-card locked" data-badge="EquipHer Graduate">
+          <div class="badge-icon">👑</div>
+          <div class="badge-name">EquipHer Graduate</div>
+          <div class="badge-desc">Complete all 52 lessons</div>
+          <button class="badge-download" onclick="downloadBadge('EquipHer Graduate')">⬇ Download & Share</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIVE SESSION -->
+    <div class="panel" id="panel-live">
+      <div class="live-card">
+        <div class="session-badge">📡 Monthly Live Session</div>
+        <div class="challenge-title" style="margin-top:12px;">Live with Coach Irene</div>
+        <div class="challenge-instructions">Once a month, all EquipHer girls gather live with Coach Irene for real conversation, Q&A, and community.</div>
+        <div style="background:rgba(122,158,138,.08);border:1px solid rgba(122,158,138,.2);border-radius:16px;padding:20px;margin-bottom:24px;">
+          <div style="font-size:12px;color:var(--soft-green);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;">Next Session</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:24px;font-weight:600;" id="live-session-date">Loading...</div>
+          <div style="font-size:13px;color:var(--muted);margin-top:6px;">Every 3rd Thursday of the month</div>
+        </div>
+        <div style="margin-bottom:8px;font-size:13px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.08em;">Countdown</div>
+        <div class="countdown-grid">
+          <div class="countdown-unit"><div class="countdown-num" id="cd-days">--</div><div class="countdown-unit-label">DAYS</div></div>
+          <div class="countdown-unit"><div class="countdown-num" id="cd-hours">--</div><div class="countdown-unit-label">HOURS</div></div>
+          <div class="countdown-unit"><div class="countdown-num" id="cd-mins">--</div><div class="countdown-unit-label">MINUTES</div></div>
+          <div class="countdown-unit"><div class="countdown-num" id="cd-secs">--</div><div class="countdown-unit-label">SECONDS</div></div>
+        </div>
+        <div style="margin-bottom:16px;">
+          <label class="field-label">Submit a question for this session</label>
+          <textarea class="reflection-textarea" id="live-question-input" placeholder="What would you like to ask Coach Irene?..." style="min-height:90px;"></textarea>
+        </div>
+        <div style="display:flex;gap:12px;">
+          <button class="btn-sm" onclick="submitLiveQuestion()">Submit My Question ✦</button>
+          <button class="btn-outline" onclick="showModal('live-modal')">📅 Add to Calendar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASK IRENE -->
+    <div class="panel" id="panel-ask">
+      <div class="challenge-card">
+        <div class="session-badge">💌 Private to Coach Irene</div>
+        <div class="challenge-title" style="margin-top:12px;">Your space to ask anything</div>
+        <div class="challenge-instructions">This goes directly and privately to Coach Irene. She reads every message personally.</div>
+        <div id="messages-list" style="margin-bottom:24px;"></div>
+        <label class="field-label">Send a new message</label>
+        <textarea class="reflection-textarea" id="ask-irene-input" placeholder="What's on your heart? A question, a thought, something you're wrestling with..." style="min-height:120px;"></textarea>
+        <button class="btn-sm" style="margin-top:16px;" onclick="sendAskIrene()">Send to Coach Irene ✦</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="live-modal">
+  <div class="modal">
+    <h3>📅 Add Live Session to Calendar</h3>
+    <p>Every 3rd Thursday of the month · 6:00 PM West Africa Time. The Zoom link will appear in your dashboard on the day of the session.</p>
+    <div class="modal-actions">
+      <button class="btn-close" onclick="closeModal('live-modal')">Cancel</button>
+      <button class="btn-sm" style="margin-top:0;" onclick="closeModal('live-modal'); showToast('✅ Added to your calendar!')">Add to Calendar</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+</body>
+</html>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EquipHer Admin — Coach Irene</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+  const SUPABASE_URL = 'https://miffjpwvtuezpwszilqa.supabase.co';
+  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1pZmZqcHd2dHVlenB3c3ppbHFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA3ODUsImV4cCI6MjA5NTkxNjc4NX0.sX5McTNlcafHoYsVALNGL5zFP6-58uPbhE7RzGo_AyQ';
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  window.sb = supabase;
+
+  // ── Auth check: only coaches can access this page ──
+  supabase.auth.getSession().then(async ({ data: { session } }) => {
+    if (!session) { showLoginOverlay(); return; }
+    const { data: profile } = await supabase.from('profiles').select('role,name').eq('id', session.user.id).single();
+    if (!profile || profile.role !== 'coach') {
+      document.getElementById('auth-overlay').innerHTML = `<div style="text-align:center;padding:60px;"><h2 style="font-family:Cormorant Garamond,serif;font-size:28px;margin-bottom:12px;">Access Restricted</h2><p style="color:#8A7570;">This page is for Coach Irene only.</p><a href="index.html" style="color:#C4726A;margin-top:20px;display:inline-block;">← Go to Dashboard</a></div>`;
+      document.getElementById('auth-overlay').style.display = 'flex';
+      return;
+    }
+    document.getElementById('coach-name-display').textContent = profile.name;
+    await loadOverview();
+    await loadAllLessons();
+    await loadMessages();
+  });
+
+  function showLoginOverlay() {
+    document.getElementById('auth-overlay').style.display = 'flex';
+  }
+
+  window.adminLogin = async function() {
+    const email = document.getElementById('admin-email').value.trim();
+    const pass  = document.getElementById('admin-pass').value;
+    if (!email || !pass) { showToast('Please enter email and password'); return; }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
+    if (error) { showToast('❌ ' + error.message); return; }
+
+    const { data: profile } = await supabase.from('profiles').select('role,name').eq('id', data.user.id).single();
+    if (!profile || profile.role !== 'coach') {
+      showToast('❌ This login is for Coach Irene only.');
+      await supabase.auth.signOut();
+      return;
+    }
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.getElementById('coach-name-display').textContent = profile.name;
+    await loadOverview();
+    await loadAllLessons();
+    await loadMessages();
+  };
+
+  window.adminLogout = async function() {
+    await supabase.auth.signOut();
+    showLoginOverlay();
+  };
+
+  // ══════════════════════════════════════
+  // OVERVIEW
+  // ══════════════════════════════════════
+  async function loadOverview() {
+    const [girls, lessons, reflections, unread] = await Promise.all([
+      supabase.from('profiles').select('*', { count:'exact', head:true }).eq('role','girl'),
+      supabase.from('lessons').select('*', { count:'exact', head:true }).eq('is_published', true),
+      supabase.from('reflections').select('*', { count:'exact', head:true }),
+      supabase.from('messages').select('*', { count:'exact', head:true }).is('reply', null)
+    ]);
+    document.getElementById('stat-girls').textContent   = girls.count || 0;
+    document.getElementById('stat-lessons').textContent = lessons.count || 0;
+    document.getElementById('stat-reflections').textContent = reflections.count || 0;
+    document.getElementById('stat-messages').textContent = unread.count || 0;
+    document.getElementById('sidebar-girls').textContent = girls.count || 0;
+    document.getElementById('sidebar-lessons').textContent = (lessons.count || 0) + ' / 52';
+    document.getElementById('sidebar-unread').textContent = unread.count || 0;
+  }
+
+  // ══════════════════════════════════════
+  // LESSONS
+  // ══════════════════════════════════════
+  async function loadAllLessons() {
+    const { data: lessons } = await supabase.from('lessons').select('*').order('lesson_number');
+    const tbody = document.getElementById('lessons-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!lessons || !lessons.length) {
+      tbody.innerHTML = `<div style="padding:32px;text-align:center;color:var(--muted);font-size:14px;">No lessons yet. Create your first lesson above.</div>`;
+      return;
+    }
+    lessons.forEach(l => {
+      tbody.innerHTML += `
+        <div class="table-row">
+          <div class="lesson-num">${l.lesson_number}</div>
+          <div class="lesson-title-cell"><strong>${l.title}</strong><span>${l.subtitle || ''}</span></div>
+          <div><span class="status-pill ${l.is_published ? 'live' : 'draft'}">${l.is_published ? '● Live' : '◐ Draft'}</span></div>
+          <div style="font-size:14px;">—</div>
+          <div class="action-btns">
+            ${!l.is_published ? `<button class="btn-icon" title="Publish" onclick="publishLesson('${l.id}')">🚀</button>` : `<button class="btn-icon" title="Unpublish" onclick="unpublishLesson('${l.id}')">⏸</button>`}
+            <button class="btn-icon" title="Delete" onclick="deleteLesson('${l.id}')">🗑</button>
+          </div>
+        </div>`;
+    });
+  }
+
+  window.publishLesson = async function(id) {
+    await supabase.from('lessons').update({ is_published: true }).eq('id', id);
+    showToast('🚀 Lesson published!');
+    await loadAllLessons();
+    await loadOverview();
+  };
+
+  window.unpublishLesson = async function(id) {
+    await supabase.from('lessons').update({ is_published: false }).eq('id', id);
+    showToast('⏸ Lesson unpublished');
+    await loadAllLessons();
+  };
+
+  window.deleteLesson = async function(id) {
+    if (!confirm('Delete this lesson? This cannot be undone.')) return;
+    await supabase.from('lessons').delete().eq('id', id);
+    showToast('🗑 Lesson deleted');
+    await loadAllLessons();
+    await loadOverview();
+  };
+
+  // ══════════════════════════════════════
+  // CREATE LESSON WITH AI
+  // ══════════════════════════════════════
+  window.checkReadyToGenerate = function() {
+    const text = document.getElementById('outline-text').value.trim();
+    document.getElementById('generate-btn').disabled = text.length < 20;
+  };
+
+  window.handleOutlineUpload = function(input) {
+    if (!input.files || !input.files[0]) return;
+    const file = input.files[0];
+    const zone = document.getElementById('outline-upload-zone');
+    zone.innerHTML = `<div class="up-icon">✅</div><h4>${file.name} uploaded</h4><p>Ready to generate questions</p>`;
+    zone.style.borderColor = 'var(--soft-green)';
+
+    if (file.type === 'text/plain') {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        document.getElementById('outline-text').value = e.target.result.substring(0, 3000);
+        window.checkReadyToGenerate();
+      };
+      reader.readAsText(file);
+    } else {
+      document.getElementById('outline-text').value = `[File uploaded: ${file.name}]\n\nPaste the key points from your outline below so the AI can read them:`;
+      window.checkReadyToGenerate();
+    }
+  };
+
+  window.generateQuestions = async function() {
+    const outlineText = document.getElementById('outline-text').value.trim();
+    const lessonTitle = document.getElementById('lesson-title-input').value || 'This Lesson';
+    const lessonNum   = document.getElementById('lesson-num-input').value || '?';
+    if (!outlineText || outlineText.length < 20) { showToast('Please paste your lesson outline first'); return; }
+
+    document.getElementById('steps-1-2').style.display = 'none';
+    document.getElementById('step-3-content').style.display = 'block';
+    document.getElementById('generating-state').style.display = 'block';
+    document.getElementById('generated-output').style.display = 'none';
+    setStep(3);
+
+    const systemPrompt = `You are an expert curriculum designer for EquipHer — a 52-week dating education and relationship wisdom programme for girls aged 15–21, led by Coach Irene. Christian and African cultural context. Focus: self-awareness, healthy standards, emotional intelligence, practical preparation for relationships.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "questions": [
+    {"id":1,"text":"question text"},
+    {"id":2,"text":"question text"},
+    {"id":3,"text":"question text"},
+    {"id":4,"text":"question text"},
+    {"id":5,"text":"question text"}
+  ],
+  "rubric": {
+    "shallow": "what a surface answer looks like",
+    "deep": "what a deep thoughtful answer looks like",
+    "feedback_focus": "most important thing to affirm in responses"
+  }
+}
+
+Questions must be personal, reflective, story-inviting — not factual. Use warm conversational language. Use <em> tags for emphasis where natural.`;
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `Lesson ${lessonNum}: "${lessonTitle}"\n\nOutline:\n${outlineText}` }]
+        })
+      });
+      const aiData = await response.json();
+      let raw = aiData.content?.[0]?.text || '{}';
+      raw = raw.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(raw);
+      window._generatedData = parsed;
+      renderGeneratedQuestions(parsed);
+    } catch (err) {
+      showToast('❌ AI generation failed. Please try again.');
+      document.getElementById('generating-state').style.display = 'none';
+      document.getElementById('steps-1-2').style.display = 'block';
+      setStep(1);
+    }
+  };
+
+  function renderGeneratedQuestions(data) {
+    document.getElementById('generating-state').style.display = 'none';
+    document.getElementById('generated-output').style.display = 'block';
+    const qList = document.getElementById('questions-list');
+    qList.innerHTML = '';
+    data.questions.forEach(q => {
+      qList.innerHTML += `
+        <div class="question-item" id="q-item-${q.id}">
+          <div class="question-item-head">
+            <div class="q-tag">Question ${q.id}</div>
+            <div class="q-actions">
+              <button class="q-edit-btn" onclick="editQuestion(${q.id})">✏ Edit</button>
+              <button class="q-edit-btn" id="save-${q.id}" style="display:none;color:var(--soft-green);" onclick="saveQuestion(${q.id})">✓ Save</button>
+            </div>
+          </div>
+          <div class="q-text-display" id="q-display-${q.id}">${q.text}</div>
+          <input class="q-edit-input" id="q-input-${q.id}" value="${q.text.replace(/<[^>]+>/g, '')}">
+        </div>`;
+    });
+    document.getElementById('rubric-output').innerHTML = `
+      <div class="rubric-row">
+        <div class="rubric-box shallow"><strong>⚠ Shallow Answer</strong>${data.rubric.shallow}</div>
+        <div class="rubric-box deep"><strong>✦ Deep Answer</strong>${data.rubric.deep}</div>
+      </div>
+      <div style="padding:14px;background:rgba(201,169,110,.07);border:1px solid rgba(201,169,110,.2);border-radius:10px;font-size:12px;color:#8A6B30;line-height:1.7;margin-top:12px;">
+        <strong style="font-weight:600;display:block;margin-bottom:4px;">🎯 Feedback Focus</strong>${data.rubric.feedback_focus}
+      </div>`;
+  }
+
+  window.editQuestion = function(id) {
+    document.getElementById(`q-display-${id}`).style.display = 'none';
+    document.getElementById(`q-input-${id}`).style.display = 'block';
+    document.getElementById(`save-${id}`).style.display = 'inline-block';
+    document.querySelector(`#q-item-${id} .q-edit-btn`).style.display = 'none';
+  };
+
+  window.saveQuestion = function(id) {
+    const val = document.getElementById(`q-input-${id}`).value;
+    document.getElementById(`q-display-${id}`).textContent = val;
+    document.getElementById(`q-display-${id}`).style.display = 'block';
+    document.getElementById(`q-input-${id}`).style.display = 'none';
+    document.getElementById(`save-${id}`).style.display = 'none';
+    document.querySelector(`#q-item-${id} .q-edit-btn`).style.display = 'inline-block';
+    if (window._generatedData) window._generatedData.questions[id-1].text = val;
+    showToast('✅ Question updated');
+  };
+
+  window.approveAndPublish = function() {
+    const title    = document.getElementById('lesson-title-input').value || 'New Lesson';
+    const num      = document.getElementById('lesson-num-input').value || '?';
+    const subtitle = document.getElementById('lesson-subtitle-input').value || '';
+    const video    = document.getElementById('lesson-video-input').value || '';
+    const phase    = document.getElementById('lesson-phase-select').value || '';
+    const challenge= document.getElementById('challenge-trigger').value || '';
+
+    document.getElementById('step-3-content').style.display = 'none';
+    document.getElementById('step-4-content').style.display = 'block';
+    setStep(4);
+
+    document.getElementById('publish-summary').innerHTML = `
+      <div style="margin-bottom:8px;"><strong>Lesson ${num}:</strong> ${title}</div>
+      <div style="margin-bottom:8px;"><strong>Subtitle:</strong> ${subtitle || '—'}</div>
+      <div style="margin-bottom:8px;"><strong>Video:</strong> ${video || '—'}</div>
+      <div style="margin-bottom:8px;"><strong>Questions:</strong> ${window._generatedData?.questions?.length || 0} AI-generated ✅</div>
+      <div><strong>Challenge:</strong> ${challenge}</div>`;
+
+    window._lessonDraft = { title, subtitle, video, phase, challenge, lessonNum: parseInt(num) };
+  };
+
+  window.saveLessonToSupabase = async function(publish) {
+    const draft = window._lessonDraft;
+    if (!draft) { showToast('Please complete the lesson form first'); return; }
+
+    const { error } = await supabase.from('lessons').insert({
+      lesson_number: draft.lessonNum,
+      title: draft.title,
+      subtitle: draft.subtitle,
+      video_url: draft.video,
+      week_phase: draft.phase,
+      questions: window._generatedData?.questions || [],
+      rubric: window._generatedData?.rubric || {},
+      challenge_type: draft.challenge,
+      is_published: publish
+    });
+
+    if (error) {
+      if (error.code === '23505') { showToast('❌ A lesson with that number already exists'); }
+      else { showToast('❌ Error saving lesson: ' + error.message); }
+      return;
+    }
+
+    showToast(publish ? '🚀 Lesson published! Girls can see it now.' : '💾 Saved as draft.');
+    resetCreateForm();
+    await loadAllLessons();
+    await loadOverview();
+    showPanel('lessons', null);
+  };
+
+  window.regenerateQuestions = function() {
+    document.getElementById('generating-state').style.display = 'block';
+    document.getElementById('generated-output').style.display = 'none';
+    window.generateQuestions();
+  };
+
+  function resetCreateForm() {
+    document.getElementById('steps-1-2').style.display = 'block';
+    document.getElementById('step-3-content').style.display = 'none';
+    document.getElementById('step-4-content').style.display = 'none';
+    document.getElementById('lesson-num-input').value = '';
+    document.getElementById('lesson-title-input').value = '';
+    document.getElementById('lesson-subtitle-input').value = '';
+    document.getElementById('lesson-video-input').value = '';
+    document.getElementById('outline-text').value = '';
+    document.getElementById('generate-btn').disabled = true;
+    setStep(1);
+  }
+
+  // ══════════════════════════════════════
+  // MESSAGES
+  // ══════════════════════════════════════
+  async function loadMessages() {
+    const { data: messages } = await supabase
+      .from('messages')
+      .select('*, profiles(name)')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    const container = document.getElementById('messages-container');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!messages || !messages.length) {
+      container.innerHTML = `<div style="padding:32px;text-align:center;color:var(--muted);font-size:14px;">No messages yet.</div>`;
+      return;
+    }
+
+    messages.forEach(m => {
+      const name = m.profiles?.name || 'A girl';
+      const initials = name.charAt(0).toUpperCase();
+      const date = new Date(m.created_at).toLocaleDateString('en-GB', {day:'numeric',month:'short'});
+      const isUnread = !m.reply;
+      container.innerHTML += `
+        <div class="message-thread" id="thread-${m.id}">
+          <div class="thread-header">
+            <div class="girl-avatar">${initials}</div>
+            <div class="thread-meta">
+              <strong>${name}</strong>
+              <span>${date}${isUnread ? ' · Unread' : ' · Replied'}</span>
+            </div>
+            ${isUnread ? '<div class="unread-badge"></div>' : ''}
+          </div>
+          <div class="message-preview">${m.message}</div>
+          ${m.reply
+            ? `<div style="font-size:13px;color:var(--soft-green);padding:10px 14px;background:rgba(122,158,138,.07);border-radius:8px;"><strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">✅ Your reply:</strong>${m.reply}</div>`
+            : `<div class="reply-area">
+                <textarea class="reply-input" id="reply-input-${m.id}" placeholder="Reply to ${name}..."></textarea>
+                <button class="btn-primary" style="align-self:flex-end;padding:10px 16px;font-size:12px;width:auto;" onclick="sendReply('${m.id}')">Reply →</button>
+              </div>`}
+        </div>`;
+    });
+  }
+
+  window.sendReply = async function(messageId) {
+    const replyText = document.getElementById(`reply-input-${messageId}`)?.value?.trim();
+    if (!replyText) { showToast('Please write a reply first'); return; }
+
+    const { error } = await supabase.from('messages').update({ reply: replyText }).eq('id', messageId);
+    if (error) { showToast('❌ Could not send reply: ' + error.message); return; }
+
+    showToast('💌 Reply sent!');
+    await loadMessages();
+    await loadOverview();
+  };
+
+  // ══════════════════════════════════════
+  // UI HELPERS
+  // ══════════════════════════════════════
+  window.showPanel = function(id, navEl) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + id).classList.add('active');
+    if (navEl) { document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); navEl.classList.add('active'); }
+    const titles = { overview:'Overview', create:'Create New Lesson', lessons:'All Lessons', messages:'Messages from Girls' };
+    document.getElementById('topbar-title').textContent = titles[id] || 'Admin';
+  };
+
+  function setStep(n) {
+    for (let i = 1; i <= 4; i++) {
+      const el = document.getElementById(`step-${i}`);
+      if (!el) continue;
+      el.className = 'step';
+      if (i < n) el.classList.add('done');
+      else if (i === n) el.classList.add('active');
+    }
+  }
+
+  window.showToast = function(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3500);
+  };
+</script>
+<style>
+  :root { --rose:#C4726A; --rose-light:#E8A89E; --rose-dark:#8B4A44; --cream:#FAF6F1; --warm-white:#FDF9F5; --gold:#C9A96E; --charcoal:#2C2420; --muted:#8A7570; --soft-green:#7A9E8A; --lavender:#9B8FB5; --border:rgba(196,114,106,.15); --shadow:0 8px 40px rgba(44,36,32,.08); --shadow-deep:0 20px 60px rgba(44,36,32,.15); }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; background:var(--cream); color:var(--charcoal); min-height:100vh; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .layout { display:flex; min-height:100vh; }
+  .sidebar { width:260px; background:var(--charcoal); display:flex; flex-direction:column; padding:32px 0; position:fixed; height:100vh; overflow-y:auto; z-index:100; }
+  .sidebar-brand { padding:0 24px 28px; border-bottom:1px solid rgba(255,255,255,.07); }
+  .brand-row { display:flex; align-items:center; gap:10px; }
+  .brand-icon { width:36px; height:36px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:16px; }
+  .brand-name { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; color:white; }
+  .brand-name span { color:var(--rose-light); }
+  .admin-chip { margin-top:10px; display:inline-block; background:rgba(196,114,106,.2); color:var(--rose-light); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; padding:4px 10px; border-radius:20px; }
+  .sidebar-coach { padding:20px 24px; border-bottom:1px solid rgba(255,255,255,.07); display:flex; align-items:center; gap:12px; }
+  .coach-avatar { width:42px; height:42px; background:linear-gradient(135deg,var(--rose-light),var(--gold)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'Cormorant Garamond',serif; font-size:18px; font-weight:600; color:white; flex-shrink:0; }
+  .coach-name { font-size:13px; font-weight:600; color:white; }
+  .coach-role { font-size:11px; color:rgba(255,255,255,.4); margin-top:2px; }
+  nav { padding:20px 12px; flex:1; }
+  .nav-label { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:rgba(255,255,255,.3); padding:0 12px; margin-bottom:6px; margin-top:16px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px; cursor:pointer; font-size:13px; color:rgba(255,255,255,.5); margin-bottom:2px; border:none; background:none; width:100%; text-align:left; transition:all .15s; }
+  .nav-item:hover { background:rgba(255,255,255,.06); color:rgba(255,255,255,.85); }
+  .nav-item.active { background:rgba(196,114,106,.2); color:var(--rose-light); font-weight:500; }
+  .nav-icon { font-size:15px; width:20px; text-align:center; }
+  .stats-mini { margin:0 12px 12px; padding:16px; background:rgba(255,255,255,.04); border-radius:12px; border:1px solid rgba(255,255,255,.06); }
+  .stats-mini-row { display:flex; justify-content:space-between; margin-bottom:10px; }
+  .stats-mini-row:last-child { margin-bottom:0; }
+  .stat-mini-label { font-size:11px; color:rgba(255,255,255,.4); }
+  .stat-mini-val { font-size:13px; font-weight:600; color:white; }
+  .logout-btn { margin:0 12px 12px; padding:10px; border:1px solid rgba(255,255,255,.1); border-radius:10px; background:transparent; color:rgba(255,255,255,.4); font-size:12px; cursor:pointer; font-family:'DM Sans',sans-serif; transition:all .2s; }
+  .logout-btn:hover { background:rgba(255,255,255,.06); color:white; }
+  .main { margin-left:260px; flex:1; min-height:100vh; }
+  .topbar { background:var(--warm-white); border-bottom:1px solid var(--border); padding:16px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:50; }
+  .topbar-title { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; }
+  .topbar-actions { display:flex; gap:10px; }
+  .btn-primary { padding:10px 22px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:500; cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px; }
+  .btn-primary:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(196,114,106,.3); }
+  .btn-outline { padding:10px 20px; border:1.5px solid var(--border); border-radius:10px; background:transparent; color:var(--muted); font-family:'DM Sans',sans-serif; font-size:13px; cursor:pointer; transition:all .15s; }
+  .btn-outline:hover { border-color:var(--rose-light); color:var(--rose); }
+  .panel { display:none; padding:36px 40px; animation:fadeIn .3s ease; }
+  .panel.active { display:block; }
+  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:32px; }
+  .stat-card { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; padding:24px; }
+  .stat-icon { font-size:24px; margin-bottom:12px; }
+  .stat-val { font-family:'Cormorant Garamond',serif; font-size:36px; font-weight:600; line-height:1; margin-bottom:4px; }
+  .stat-label { font-size:12px; color:var(--muted); }
+  .section-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+  .section-head h3 { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; }
+  .lessons-table { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; overflow:hidden; margin-bottom:32px; }
+  .table-header { display:grid; grid-template-columns:60px 1fr 120px 100px 100px; padding:14px 24px; background:rgba(196,114,106,.05); border-bottom:1px solid var(--border); font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .table-row { display:grid; grid-template-columns:60px 1fr 120px 100px 100px; padding:18px 24px; border-bottom:1px solid var(--border); align-items:center; transition:background .15s; }
+  .table-row:last-child { border-bottom:none; }
+  .table-row:hover { background:rgba(196,114,106,.03); }
+  .lesson-num { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; color:var(--rose-light); }
+  .lesson-title-cell strong { font-size:14px; font-weight:500; display:block; margin-bottom:3px; }
+  .lesson-title-cell span { font-size:12px; color:var(--muted); }
+  .status-pill { display:inline-flex; align-items:center; gap:5px; padding:5px 12px; border-radius:20px; font-size:11px; font-weight:600; }
+  .status-pill.live { background:rgba(122,158,138,.12); color:var(--soft-green); }
+  .status-pill.draft { background:rgba(201,169,110,.12); color:var(--gold); }
+  .action-btns { display:flex; gap:6px; }
+  .btn-icon { width:30px; height:30px; border:1px solid var(--border); border-radius:8px; background:transparent; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:13px; transition:all .15s; }
+  .btn-icon:hover { border-color:var(--rose-light); background:rgba(196,114,106,.05); }
+  .create-layout { display:grid; grid-template-columns:1fr 1fr; gap:24px; max-width:1100px; }
+  .create-card { background:var(--warm-white); border:1px solid var(--border); border-radius:20px; padding:32px; }
+  .card-head { margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--border); }
+  .card-head h3 { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; margin-bottom:4px; }
+  .card-head p { font-size:12px; color:var(--muted); font-weight:300; }
+  .field-group { margin-bottom:18px; }
+  .field-label { font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:8px; display:block; }
+  .field-input { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:var(--cream); outline:none; transition:border-color .2s; }
+  .field-input:focus { border-color:var(--rose-light); }
+  .field-select { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:var(--cream); outline:none; cursor:pointer; }
+  .upload-zone { border:2px dashed rgba(196,114,106,.25); border-radius:14px; padding:36px 24px; text-align:center; cursor:pointer; transition:all .2s; background:rgba(196,114,106,.02); }
+  .upload-zone:hover { border-color:var(--rose-light); background:rgba(196,114,106,.04); }
+  .upload-zone .up-icon { font-size:32px; margin-bottom:10px; }
+  .upload-zone h4 { font-size:14px; font-weight:500; margin-bottom:6px; }
+  .upload-zone p { font-size:12px; color:var(--muted); }
+  .file-types { display:flex; gap:8px; justify-content:center; margin-top:14px; }
+  .file-type-chip { padding:4px 10px; background:rgba(196,114,106,.08); color:var(--rose); border-radius:20px; font-size:11px; font-weight:600; }
+  .ai-gen-btn { width:100%; padding:16px; background:linear-gradient(135deg,rgba(196,114,106,.1),rgba(201,169,110,.1)); border:1.5px solid rgba(196,114,106,.25); border-radius:12px; font-family:'DM Sans',sans-serif; font-size:14px; font-weight:500; color:var(--rose-dark); cursor:pointer; transition:all .2s; display:flex; align-items:center; justify-content:center; gap:10px; }
+  .ai-gen-btn:hover { background:linear-gradient(135deg,rgba(196,114,106,.15),rgba(201,169,110,.15)); border-color:var(--rose-light); }
+  .ai-gen-btn:disabled { opacity:.5; cursor:not-allowed; }
+  .gen-spinner { width:40px; height:40px; border:3px solid rgba(196,114,106,.15); border-top-color:var(--rose); border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 16px; }
+  .gen-label { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:400; margin-bottom:6px; }
+  .gen-sub { font-size:13px; color:var(--muted); }
+  .question-item { background:var(--cream); border:1.5px solid var(--border); border-radius:14px; padding:20px; margin-bottom:12px; transition:border-color .15s; }
+  .question-item:hover { border-color:var(--rose-light); }
+  .question-item-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .q-tag { font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--rose); }
+  .q-actions { display:flex; gap:6px; }
+  .q-edit-btn { font-size:11px; padding:4px 10px; border:1px solid var(--border); border-radius:6px; background:transparent; color:var(--muted); cursor:pointer; font-family:'DM Sans',sans-serif; transition:all .15s; }
+  .q-edit-btn:hover { border-color:var(--rose-light); color:var(--rose); }
+  .q-text-display { font-size:14px; line-height:1.6; }
+  .q-edit-input { width:100%; padding:10px 14px; border:1.5px solid var(--rose-light); border-radius:8px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:white; outline:none; display:none; }
+  .rubric-section { margin-top:20px; padding-top:20px; border-top:1px solid var(--border); }
+  .rubric-section h4 { font-size:13px; font-weight:600; margin-bottom:12px; }
+  .rubric-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px; }
+  .rubric-box { padding:14px; border-radius:10px; font-size:12px; line-height:1.6; font-weight:300; }
+  .rubric-box.shallow { background:rgba(196,114,106,.07); border:1px solid rgba(196,114,106,.15); color:var(--rose-dark); }
+  .rubric-box.deep { background:rgba(122,158,138,.07); border:1px solid rgba(122,158,138,.2); color:#3D6B56; }
+  .rubric-box strong { display:block; margin-bottom:4px; font-weight:600; font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+  .steps { display:flex; gap:0; margin-bottom:32px; background:var(--warm-white); border:1px solid var(--border); border-radius:14px; padding:6px; max-width:600px; }
+  .step { flex:1; padding:10px 16px; border-radius:10px; font-size:12px; font-weight:500; color:var(--muted); text-align:center; transition:all .2s; display:flex; align-items:center; justify-content:center; gap:7px; }
+  .step.active { background:var(--rose); color:white; }
+  .step.done { background:rgba(122,158,138,.12); color:var(--soft-green); }
+  .step-num { width:20px; height:20px; border-radius:50%; background:rgba(255,255,255,.25); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; }
+  .step:not(.active):not(.done) .step-num { background:rgba(196,114,106,.1); color:var(--rose-light); }
+  .message-thread { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; padding:24px; margin-bottom:16px; }
+  .thread-header { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+  .girl-avatar { width:38px; height:38px; background:linear-gradient(135deg,var(--rose-light),var(--lavender)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'Cormorant Garamond',serif; font-size:16px; font-weight:600; color:white; flex-shrink:0; }
+  .thread-meta { flex:1; }
+  .thread-meta strong { font-size:14px; font-weight:600; display:block; }
+  .thread-meta span { font-size:12px; color:var(--muted); }
+  .unread-badge { width:8px; height:8px; background:var(--rose); border-radius:50%; }
+  .message-preview { font-size:14px; line-height:1.7; color:var(--charcoal); font-weight:300; margin-bottom:16px; padding:14px 18px; background:var(--cream); border-radius:10px; border-left:3px solid var(--rose-light); }
+  .reply-area { display:flex; gap:10px; }
+  .reply-input { flex:1; padding:10px 14px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; color:var(--charcoal); background:var(--cream); outline:none; resize:none; transition:border-color .2s; min-height:44px; }
+  .reply-input:focus { border-color:var(--rose-light); }
+  .toast { position:fixed; bottom:32px; right:32px; background:var(--charcoal); color:white; padding:14px 22px; border-radius:12px; font-size:13px; z-index:9999; box-shadow:var(--shadow-deep); transform:translateY(80px); opacity:0; transition:all .3s ease; }
+  .toast.show { transform:translateY(0); opacity:1; }
+
+  /* AUTH OVERLAY */
+  #auth-overlay { position:fixed; inset:0; background:linear-gradient(145deg,#FAF6F1,#EDE0D8); z-index:9999; display:none; align-items:center; justify-content:center; }
+  .auth-card { background:white; border-radius:24px; padding:48px; width:400px; max-width:90vw; box-shadow:0 20px 60px rgba(44,36,32,.15); }
+  .auth-card h2 { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:600; margin-bottom:6px; }
+  .auth-card p { font-size:13px; color:#8A7570; margin-bottom:28px; }
+  .auth-field { margin-bottom:16px; }
+  .auth-field label { font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:#8A7570; margin-bottom:8px; display:block; }
+  .auth-field input { width:100%; padding:13px 16px; border:1.5px solid rgba(196,114,106,.15); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; outline:none; background:#FAF6F1; }
+  .auth-field input:focus { border-color:#E8A89E; }
+  .auth-btn { width:100%; padding:15px; background:linear-gradient(135deg,#C4726A,#8B4A44); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:500; cursor:pointer; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<!-- AUTH OVERLAY -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
+      <div style="width:36px;height:36px;background:linear-gradient(135deg,#C4726A,#8B4A44);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px;">✦</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600;">Equip<span style="color:#C4726A;">Her</span></div>
+    </div>
+    <h2>Coach Irene</h2>
+    <p>Admin access only. Sign in with your coach account.</p>
+    <div class="auth-field">
+      <label>Email</label>
+      <input type="email" id="admin-email" placeholder="your@email.com" onkeydown="if(event.key==='Enter') adminLogin()">
+    </div>
+    <div class="auth-field">
+      <label>Password</label>
+      <input type="password" id="admin-pass" placeholder="••••••••" onkeydown="if(event.key==='Enter') adminLogin()">
+    </div>
+    <button class="auth-btn" onclick="adminLogin()">Sign In to Admin Panel →</button>
+    <div style="text-align:center;margin-top:16px;font-size:13px;color:#8A7570;">
+      <a href="index.html" style="color:#C4726A;">← Go to Girls' Dashboard</a>
+    </div>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-row">
+        <div class="brand-icon">✦</div>
+        <div class="brand-name">Equip<span>Her</span></div>
+      </div>
+      <div class="admin-chip">Admin Panel</div>
+    </div>
+    <div class="sidebar-coach">
+      <div class="coach-avatar">I</div>
+      <div>
+        <div class="coach-name" id="coach-name-display">Coach Irene</div>
+        <div class="coach-role">Programme Director</div>
+      </div>
+    </div>
+    <nav>
+      <div class="nav-label">Programme</div>
+      <button class="nav-item active" onclick="showPanel('overview',this)"><span class="nav-icon">📊</span> Overview</button>
+      <button class="nav-item" onclick="showPanel('create',this)"><span class="nav-icon">✦</span> Create New Lesson</button>
+      <button class="nav-item" onclick="showPanel('lessons',this)"><span class="nav-icon">📚</span> All Lessons</button>
+      <div class="nav-label">Girls</div>
+      <button class="nav-item" onclick="showPanel('messages',this)"><span class="nav-icon">💌</span> Messages</button>
+    </nav>
+    <div class="stats-mini">
+      <div class="stats-mini-row"><div class="stat-mini-label">Girls enrolled</div><div class="stat-mini-val" id="sidebar-girls">—</div></div>
+      <div class="stats-mini-row"><div class="stat-mini-label">Lessons live</div><div class="stat-mini-val" id="sidebar-lessons">—</div></div>
+      <div class="stats-mini-row"><div class="stat-mini-label">Unread messages</div><div class="stat-mini-val" style="color:var(--rose-light);" id="sidebar-unread">—</div></div>
+    </div>
+    <button class="logout-btn" onclick="adminLogout()">Sign Out</button>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="topbar-title" id="topbar-title">Overview</div>
+      <div class="topbar-actions">
+        <button class="btn-outline" onclick="window.open('index.html','_blank')">👁 View Girls' Dashboard</button>
+        <button class="btn-primary" onclick="showPanel('create',null)">＋ New Lesson</button>
+      </div>
+    </div>
+
+    <!-- OVERVIEW -->
+    <div class="panel active" id="panel-overview">
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-icon">👧</div><div class="stat-val" id="stat-girls">—</div><div class="stat-label">Girls enrolled</div></div>
+        <div class="stat-card"><div class="stat-icon">📚</div><div class="stat-val" id="stat-lessons">—</div><div class="stat-label">Lessons published</div></div>
+        <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-val" id="stat-reflections">—</div><div class="stat-label">Reflections submitted</div></div>
+        <div class="stat-card"><div class="stat-icon" style="color:var(--rose);">💌</div><div class="stat-val" style="color:var(--rose);" id="stat-messages">—</div><div class="stat-label">Unread messages</div></div>
+      </div>
+      <div class="section-head">
+        <h3>Quick Actions</h3>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('create',null)">
+          <div style="font-size:28px;margin-bottom:12px;">✦</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Create New Lesson</div>
+          <div style="font-size:12px;color:var(--muted);">Upload your outline, AI generates questions</div>
+        </div>
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('messages',null)">
+          <div style="font-size:28px;margin-bottom:12px;">💌</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Reply to Messages</div>
+          <div style="font-size:12px;color:var(--muted);">Private messages from girls waiting</div>
+        </div>
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('lessons',null)">
+          <div style="font-size:28px;margin-bottom:12px;">📚</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Manage Lessons</div>
+          <div style="font-size:12px;color:var(--muted);">Publish, unpublish, and review</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CREATE LESSON -->
+    <div class="panel" id="panel-create">
+      <div class="steps">
+        <div class="step active" id="step-1"><div class="step-num">1</div> Lesson Details</div>
+        <div class="step" id="step-2"><div class="step-num">2</div> Upload Outline</div>
+        <div class="step" id="step-3"><div class="step-num">3</div> Review Questions</div>
+        <div class="step" id="step-4"><div class="step-num">4</div> Publish</div>
+      </div>
+
+      <div id="steps-1-2">
+        <div class="create-layout">
+          <div class="create-card">
+            <div class="card-head"><h3>Lesson Details</h3><p>Basic information about this lesson</p></div>
+            <div class="field-group"><label class="field-label">Lesson Number</label><input type="number" class="field-input" id="lesson-num-input" placeholder="e.g. 14"></div>
+            <div class="field-group"><label class="field-label">Lesson Title</label><input type="text" class="field-input" id="lesson-title-input" placeholder="e.g. Identity Before Intimacy"></div>
+            <div class="field-group"><label class="field-label">Subtitle / Short Description</label><input type="text" class="field-input" id="lesson-subtitle-input" placeholder="e.g. Knowing who you are first"></div>
+            <div class="field-group"><label class="field-label">Video Link (YouTube / Vimeo)</label><input type="url" class="field-input" id="lesson-video-input" placeholder="https://..."></div>
+            <div class="field-group"><label class="field-label">Week / Phase</label>
+              <select class="field-select" id="lesson-phase-select">
+                <option>Week 1–4 (Foundation)</option>
+                <option>Week 5–12 (Identity)</option>
+                <option>Week 13–20 (Relationships)</option>
+                <option>Week 21–36 (Wisdom)</option>
+                <option>Week 37–52 (Readiness)</option>
+              </select>
+            </div>
+            <div class="field-group"><label class="field-label">Challenge Trigger</label>
+              <select class="field-select" id="challenge-trigger">
+                <option>No challenge after this lesson</option>
+                <option>Trigger peer conversation challenge</option>
+                <option>Trigger journaling challenge</option>
+                <option>Trigger family conversation challenge</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="create-card">
+            <div class="card-head"><h3>Upload Lesson Outline</h3><p>Upload your PDF or Word doc — AI reads it and generates questions and rubric</p></div>
+            <div class="upload-zone" id="outline-upload-zone" onclick="document.getElementById('outline-file').click()">
+              <div class="up-icon">📄</div>
+              <h4>Drop your lesson outline here</h4>
+              <p>Coach Irene, upload what you already prepared</p>
+              <div class="file-types">
+                <span class="file-type-chip">PDF</span>
+                <span class="file-type-chip">DOCX</span>
+                <span class="file-type-chip">TXT</span>
+              </div>
+              <input type="file" id="outline-file" style="display:none;" accept=".pdf,.docx,.txt" onchange="handleOutlineUpload(this)">
+            </div>
+            <div style="text-align:center;margin:16px 0;font-size:12px;color:var(--muted);">— or paste your notes directly —</div>
+            <textarea class="field-input" id="outline-text" placeholder="Paste lesson outline, speaker notes, or key points here..." style="min-height:140px;resize:vertical;line-height:1.7;" oninput="checkReadyToGenerate()"></textarea>
+            <div style="margin-top:16px;">
+              <button class="ai-gen-btn" id="generate-btn" onclick="generateQuestions()" disabled>
+                <span>✦</span> Generate Questions & Rubric with AI
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 3 -->
+      <div id="step-3-content" style="display:none;max-width:800px;">
+        <div id="generating-state" style="display:none;text-align:center;padding:48px;">
+          <div class="gen-spinner"></div>
+          <div class="gen-label">Reading your lesson outline...</div>
+          <div class="gen-sub">AI is writing reflection questions and building the feedback rubric</div>
+        </div>
+        <div id="generated-output" style="display:none;" class="create-card">
+          <div class="card-head"><h3>Review Generated Questions</h3><p>Edit any question by clicking the pencil. The AI uses these to give girls personalised feedback.</p></div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;padding:14px 18px;background:rgba(122,158,138,.08);border:1px solid rgba(122,158,138,.2);border-radius:12px;">
+            <span>✅</span><span style="font-size:13px;color:var(--soft-green);font-weight:500;">5 reflection questions generated. Review and edit as needed.</span>
+          </div>
+          <div id="questions-list"></div>
+          <div class="rubric-section">
+            <h4>📋 AI Feedback Rubric</h4>
+            <p style="font-size:12px;color:var(--muted);margin-bottom:14px;font-weight:300;">This guides the AI when giving girls feedback on this lesson.</p>
+            <div id="rubric-output"></div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:24px;">
+            <button class="btn-primary" onclick="approveAndPublish()">✦ Approve & Continue to Publish</button>
+            <button class="btn-outline" onclick="regenerateQuestions()">↻ Regenerate</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 4 -->
+      <div id="step-4-content" style="display:none;max-width:640px;">
+        <div class="create-card">
+          <div class="card-head"><h3>🚀 Ready to Publish</h3><p>Review and choose to publish now or save as draft.</p></div>
+          <div style="background:rgba(122,158,138,.08);border:1px solid rgba(122,158,138,.2);border-radius:14px;padding:20px;margin-bottom:24px;">
+            <div style="font-size:12px;font-weight:600;color:var(--soft-green);letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px;">Lesson Summary</div>
+            <div id="publish-summary" style="font-size:14px;line-height:1.8;"></div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:8px;">
+            <button class="btn-primary" style="padding:14px 28px;" onclick="saveLessonToSupabase(true)">🚀 Publish Now — Girls See It Immediately</button>
+            <button class="btn-outline" onclick="saveLessonToSupabase(false)">💾 Save as Draft</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALL LESSONS -->
+    <div class="panel" id="panel-lessons">
+      <div class="section-head">
+        <h3>All Lessons</h3>
+        <button class="btn-primary" onclick="showPanel('create',null)">＋ New Lesson</button>
+      </div>
+      <div class="lessons-table">
+        <div class="table-header">
+          <div>#</div><div>Lesson Title</div><div>Status</div><div>Reflections</div><div>Actions</div>
+        </div>
+        <div id="lessons-tbody"></div>
+      </div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="panel" id="panel-messages">
+      <div class="section-head">
+        <h3>Messages from Girls</h3>
+        <button class="btn-outline" onclick="loadMessages()">↻ Refresh</button>
+      </div>
+      <div id="messages-container" style="max-width:760px;"></div>
+    </div>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+</body>
+</html>
