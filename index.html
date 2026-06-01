@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EquipHer — Your Learning Space</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<script type="module">
-  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+  const { createClient } = supabase;
 
   const SUPABASE_URL = 'https://miffjpwvtuezpwszilqa.supabase.co';
   const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1pZmZqcHd2dHVlenB3c3ppbHFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA3ODUsImV4cCI6MjA5NTkxNjc4NX0.sX5McTNlcafHoYsVALNGL5zFP6-58uPbhE7RzGo_AyQ';
@@ -29,12 +30,35 @@
     const pass  = document.getElementById('login-pass').value;
     if (!email || !pass) { showToast('Please enter your email and password'); return; }
 
-    setLoading('login-btn', true);
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
-    setLoading('login-btn', false);
+    const btn = document.getElementById('login-btn');
+    btn.textContent = 'Signing in...';
+    btn.disabled = true;
 
-    if (error) { showToast('❌ ' + error.message); return; }
-    await loadProfile(data.user);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
+      
+      if (error) { 
+        showToast('❌ Login error: ' + error.message); 
+        btn.textContent = 'Sign In →';
+        btn.disabled = false;
+        return; 
+      }
+
+      if (!data || !data.user) {
+        showToast('❌ No user returned. Please try again.');
+        btn.textContent = 'Sign In →';
+        btn.disabled = false;
+        return;
+      }
+
+      showToast('✅ Signed in! Loading your dashboard...');
+      await loadProfile(data.user);
+
+    } catch(err) {
+      showToast('❌ Unexpected error: ' + err.message);
+      btn.textContent = 'Sign In →';
+      btn.disabled = false;
+    }
   };
 
   window.doRegister = async function() {
@@ -76,19 +100,53 @@
 
   async function loadProfile(user) {
     window.currentUser = user;
-    const { data: profile, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
 
-    if (error || !profile) {
-      showToast('Could not load your profile. Please try again.');
-      return;
+    try {
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+
+      if (error) {
+        // Profile does not exist yet — create one automatically
+        if (error.code === 'PGRST116') {
+          showToast('Setting up your profile...');
+          const { data: newProfile, error: insertError } = await supabase
+            .from('profiles')
+            .insert({ 
+              id: user.id, 
+              name: user.email.split('@')[0],
+              role: 'girl',
+              streak_count: 0,
+              current_lesson: 1
+            })
+            .select()
+            .single();
+
+          if (insertError) {
+            showToast('❌ Profile setup failed: ' + insertError.message);
+            return;
+          }
+          window.currentProfile = newProfile;
+          enterDashboard(newProfile);
+          return;
+        }
+        showToast('❌ Profile error: ' + error.message + ' (code: ' + error.code + ')');
+        return;
+      }
+
+      if (!profile) {
+        showToast('❌ Profile not found. Contact Coach Irene.');
+        return;
+      }
+
+      window.currentProfile = profile;
+      enterDashboard(profile);
+
+    } catch(err) {
+      showToast('❌ Unexpected profile error: ' + err.message);
     }
-
-    window.currentProfile = profile;
-    enterDashboard(profile);
   }
 
   // ── Check existing session on page load ──
