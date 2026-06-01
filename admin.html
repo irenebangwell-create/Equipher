@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EquipHer Admin — Coach Irene</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<script type="module">
-  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+  const { createClient } = supabase;
 
   const SUPABASE_URL = 'https://miffjpwvtuezpwszilqa.supabase.co';
   const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1pZmZqcHd2dHVlenB3c3ppbHFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA3ODUsImV4cCI6MjA5NTkxNjc4NX0.sX5McTNlcafHoYsVALNGL5zFP6-58uPbhE7RzGo_AyQ';
