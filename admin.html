@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EquipHer Admin — Coach Irene</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+  const SUPABASE_URL = 'https://miffjpwvtuezpwszilqa.supabase.co';
+  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1pZmZqcHd2dHVlenB3c3ppbHFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNDA3ODUsImV4cCI6MjA5NTkxNjc4NX0.sX5McTNlcafHoYsVALNGL5zFP6-58uPbhE7RzGo_AyQ';
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  window.sb = supabase;
+
+  // ── Auth check: only coaches can access this page ──
+  supabase.auth.getSession().then(async ({ data: { session } }) => {
+    if (!session) { showLoginOverlay(); return; }
+    const { data: profile } = await supabase.from('profiles').select('role,name').eq('id', session.user.id).single();
+    if (!profile || profile.role !== 'coach') {
+      document.getElementById('auth-overlay').innerHTML = `<div style="text-align:center;padding:60px;"><h2 style="font-family:Cormorant Garamond,serif;font-size:28px;margin-bottom:12px;">Access Restricted</h2><p style="color:#8A7570;">This page is for Coach Irene only.</p><a href="index.html" style="color:#C4726A;margin-top:20px;display:inline-block;">← Go to Dashboard</a></div>`;
+      document.getElementById('auth-overlay').style.display = 'flex';
+      return;
+    }
+    document.getElementById('coach-name-display').textContent = profile.name;
+    await loadOverview();
+    await loadAllLessons();
+    await loadMessages();
+  });
+
+  function showLoginOverlay() {
+    document.getElementById('auth-overlay').style.display = 'flex';
+  }
+
+  window.adminLogin = async function() {
+    const email = document.getElementById('admin-email').value.trim();
+    const pass  = document.getElementById('admin-pass').value;
+    if (!email || !pass) { showToast('Please enter email and password'); return; }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password: pass });
+    if (error) { showToast('❌ ' + error.message); return; }
+
+    const { data: profile } = await supabase.from('profiles').select('role,name').eq('id', data.user.id).single();
+    if (!profile || profile.role !== 'coach') {
+      showToast('❌ This login is for Coach Irene only.');
+      await supabase.auth.signOut();
+      return;
+    }
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.getElementById('coach-name-display').textContent = profile.name;
+    await loadOverview();
+    await loadAllLessons();
+    await loadMessages();
+  };
+
+  window.adminLogout = async function() {
+    await supabase.auth.signOut();
+    showLoginOverlay();
+  };
+
+  // ══════════════════════════════════════
+  // OVERVIEW
+  // ══════════════════════════════════════
+  async function loadOverview() {
+    const [girls, lessons, reflections, unread] = await Promise.all([
+      supabase.from('profiles').select('*', { count:'exact', head:true }).eq('role','girl'),
+      supabase.from('lessons').select('*', { count:'exact', head:true }).eq('is_published', true),
+      supabase.from('reflections').select('*', { count:'exact', head:true }),
+      supabase.from('messages').select('*', { count:'exact', head:true }).is('reply', null)
+    ]);
+    document.getElementById('stat-girls').textContent   = girls.count || 0;
+    document.getElementById('stat-lessons').textContent = lessons.count || 0;
+    document.getElementById('stat-reflections').textContent = reflections.count || 0;
+    document.getElementById('stat-messages').textContent = unread.count || 0;
+    document.getElementById('sidebar-girls').textContent = girls.count || 0;
+    document.getElementById('sidebar-lessons').textContent = (lessons.count || 0) + ' / 52';
+    document.getElementById('sidebar-unread').textContent = unread.count || 0;
+  }
+
+  // ══════════════════════════════════════
+  // LESSONS
+  // ══════════════════════════════════════
+  async function loadAllLessons() {
+    const { data: lessons } = await supabase.from('lessons').select('*').order('lesson_number');
+    const tbody = document.getElementById('lessons-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!lessons || !lessons.length) {
+      tbody.innerHTML = `<div style="padding:32px;text-align:center;color:var(--muted);font-size:14px;">No lessons yet. Create your first lesson above.</div>`;
+      return;
+    }
+    lessons.forEach(l => {
+      tbody.innerHTML += `
+        <div class="table-row">
+          <div class="lesson-num">${l.lesson_number}</div>
+          <div class="lesson-title-cell"><strong>${l.title}</strong><span>${l.subtitle || ''}</span></div>
+          <div><span class="status-pill ${l.is_published ? 'live' : 'draft'}">${l.is_published ? '● Live' : '◐ Draft'}</span></div>
+          <div style="font-size:14px;">—</div>
+          <div class="action-btns">
+            ${!l.is_published ? `<button class="btn-icon" title="Publish" onclick="publishLesson('${l.id}')">🚀</button>` : `<button class="btn-icon" title="Unpublish" onclick="unpublishLesson('${l.id}')">⏸</button>`}
+            <button class="btn-icon" title="Delete" onclick="deleteLesson('${l.id}')">🗑</button>
+          </div>
+        </div>`;
+    });
+  }
+
+  window.publishLesson = async function(id) {
+    await supabase.from('lessons').update({ is_published: true }).eq('id', id);
+    showToast('🚀 Lesson published!');
+    await loadAllLessons();
+    await loadOverview();
+  };
+
+  window.unpublishLesson = async function(id) {
+    await supabase.from('lessons').update({ is_published: false }).eq('id', id);
+    showToast('⏸ Lesson unpublished');
+    await loadAllLessons();
+  };
+
+  window.deleteLesson = async function(id) {
+    if (!confirm('Delete this lesson? This cannot be undone.')) return;
+    await supabase.from('lessons').delete().eq('id', id);
+    showToast('🗑 Lesson deleted');
+    await loadAllLessons();
+    await loadOverview();
+  };
+
+  // ══════════════════════════════════════
+  // CREATE LESSON WITH AI
+  // ══════════════════════════════════════
+  window.checkReadyToGenerate = function() {
+    const text = document.getElementById('outline-text').value.trim();
+    document.getElementById('generate-btn').disabled = text.length < 20;
+  };
+
+  window.handleOutlineUpload = function(input) {
+    if (!input.files || !input.files[0]) return;
+    const file = input.files[0];
+    const zone = document.getElementById('outline-upload-zone');
+    zone.innerHTML = `<div class="up-icon">✅</div><h4>${file.name} uploaded</h4><p>Ready to generate questions</p>`;
+    zone.style.borderColor = 'var(--soft-green)';
+
+    if (file.type === 'text/plain') {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        document.getElementById('outline-text').value = e.target.result.substring(0, 3000);
+        window.checkReadyToGenerate();
+      };
+      reader.readAsText(file);
+    } else {
+      document.getElementById('outline-text').value = `[File uploaded: ${file.name}]\n\nPaste the key points from your outline below so the AI can read them:`;
+      window.checkReadyToGenerate();
+    }
+  };
+
+  window.generateQuestions = async function() {
+    const outlineText = document.getElementById('outline-text').value.trim();
+    const lessonTitle = document.getElementById('lesson-title-input').value || 'This Lesson';
+    const lessonNum   = document.getElementById('lesson-num-input').value || '?';
+    if (!outlineText || outlineText.length < 20) { showToast('Please paste your lesson outline first'); return; }
+
+    document.getElementById('steps-1-2').style.display = 'none';
+    document.getElementById('step-3-content').style.display = 'block';
+    document.getElementById('generating-state').style.display = 'block';
+    document.getElementById('generated-output').style.display = 'none';
+    setStep(3);
+
+    const systemPrompt = `You are an expert curriculum designer for EquipHer — a 52-week dating education and relationship wisdom programme for girls aged 15–21, led by Coach Irene. Christian and African cultural context. Focus: self-awareness, healthy standards, emotional intelligence, practical preparation for relationships.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "questions": [
+    {"id":1,"text":"question text"},
+    {"id":2,"text":"question text"},
+    {"id":3,"text":"question text"},
+    {"id":4,"text":"question text"},
+    {"id":5,"text":"question text"}
+  ],
+  "rubric": {
+    "shallow": "what a surface answer looks like",
+    "deep": "what a deep thoughtful answer looks like",
+    "feedback_focus": "most important thing to affirm in responses"
+  }
+}
+
+Questions must be personal, reflective, story-inviting — not factual. Use warm conversational language. Use <em> tags for emphasis where natural.`;
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `Lesson ${lessonNum}: "${lessonTitle}"\n\nOutline:\n${outlineText}` }]
+        })
+      });
+      const aiData = await response.json();
+      let raw = aiData.content?.[0]?.text || '{}';
+      raw = raw.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(raw);
+      window._generatedData = parsed;
+      renderGeneratedQuestions(parsed);
+    } catch (err) {
+      showToast('❌ AI generation failed. Please try again.');
+      document.getElementById('generating-state').style.display = 'none';
+      document.getElementById('steps-1-2').style.display = 'block';
+      setStep(1);
+    }
+  };
+
+  function renderGeneratedQuestions(data) {
+    document.getElementById('generating-state').style.display = 'none';
+    document.getElementById('generated-output').style.display = 'block';
+    const qList = document.getElementById('questions-list');
+    qList.innerHTML = '';
+    data.questions.forEach(q => {
+      qList.innerHTML += `
+        <div class="question-item" id="q-item-${q.id}">
+          <div class="question-item-head">
+            <div class="q-tag">Question ${q.id}</div>
+            <div class="q-actions">
+              <button class="q-edit-btn" onclick="editQuestion(${q.id})">✏ Edit</button>
+              <button class="q-edit-btn" id="save-${q.id}" style="display:none;color:var(--soft-green);" onclick="saveQuestion(${q.id})">✓ Save</button>
+            </div>
+          </div>
+          <div class="q-text-display" id="q-display-${q.id}">${q.text}</div>
+          <input class="q-edit-input" id="q-input-${q.id}" value="${q.text.replace(/<[^>]+>/g, '')}">
+        </div>`;
+    });
+    document.getElementById('rubric-output').innerHTML = `
+      <div class="rubric-row">
+        <div class="rubric-box shallow"><strong>⚠ Shallow Answer</strong>${data.rubric.shallow}</div>
+        <div class="rubric-box deep"><strong>✦ Deep Answer</strong>${data.rubric.deep}</div>
+      </div>
+      <div style="padding:14px;background:rgba(201,169,110,.07);border:1px solid rgba(201,169,110,.2);border-radius:10px;font-size:12px;color:#8A6B30;line-height:1.7;margin-top:12px;">
+        <strong style="font-weight:600;display:block;margin-bottom:4px;">🎯 Feedback Focus</strong>${data.rubric.feedback_focus}
+      </div>`;
+  }
+
+  window.editQuestion = function(id) {
+    document.getElementById(`q-display-${id}`).style.display = 'none';
+    document.getElementById(`q-input-${id}`).style.display = 'block';
+    document.getElementById(`save-${id}`).style.display = 'inline-block';
+    document.querySelector(`#q-item-${id} .q-edit-btn`).style.display = 'none';
+  };
+
+  window.saveQuestion = function(id) {
+    const val = document.getElementById(`q-input-${id}`).value;
+    document.getElementById(`q-display-${id}`).textContent = val;
+    document.getElementById(`q-display-${id}`).style.display = 'block';
+    document.getElementById(`q-input-${id}`).style.display = 'none';
+    document.getElementById(`save-${id}`).style.display = 'none';
+    document.querySelector(`#q-item-${id} .q-edit-btn`).style.display = 'inline-block';
+    if (window._generatedData) window._generatedData.questions[id-1].text = val;
+    showToast('✅ Question updated');
+  };
+
+  window.approveAndPublish = function() {
+    const title    = document.getElementById('lesson-title-input').value || 'New Lesson';
+    const num      = document.getElementById('lesson-num-input').value || '?';
+    const subtitle = document.getElementById('lesson-subtitle-input').value || '';
+    const video    = document.getElementById('lesson-video-input').value || '';
+    const phase    = document.getElementById('lesson-phase-select').value || '';
+    const challenge= document.getElementById('challenge-trigger').value || '';
+
+    document.getElementById('step-3-content').style.display = 'none';
+    document.getElementById('step-4-content').style.display = 'block';
+    setStep(4);
+
+    document.getElementById('publish-summary').innerHTML = `
+      <div style="margin-bottom:8px;"><strong>Lesson ${num}:</strong> ${title}</div>
+      <div style="margin-bottom:8px;"><strong>Subtitle:</strong> ${subtitle || '—'}</div>
+      <div style="margin-bottom:8px;"><strong>Video:</strong> ${video || '—'}</div>
+      <div style="margin-bottom:8px;"><strong>Questions:</strong> ${window._generatedData?.questions?.length || 0} AI-generated ✅</div>
+      <div><strong>Challenge:</strong> ${challenge}</div>`;
+
+    window._lessonDraft = { title, subtitle, video, phase, challenge, lessonNum: parseInt(num) };
+  };
+
+  window.saveLessonToSupabase = async function(publish) {
+    const draft = window._lessonDraft;
+    if (!draft) { showToast('Please complete the lesson form first'); return; }
+
+    const { error } = await supabase.from('lessons').insert({
+      lesson_number: draft.lessonNum,
+      title: draft.title,
+      subtitle: draft.subtitle,
+      video_url: draft.video,
+      week_phase: draft.phase,
+      questions: window._generatedData?.questions || [],
+      rubric: window._generatedData?.rubric || {},
+      challenge_type: draft.challenge,
+      is_published: publish
+    });
+
+    if (error) {
+      if (error.code === '23505') { showToast('❌ A lesson with that number already exists'); }
+      else { showToast('❌ Error saving lesson: ' + error.message); }
+      return;
+    }
+
+    showToast(publish ? '🚀 Lesson published! Girls can see it now.' : '💾 Saved as draft.');
+    resetCreateForm();
+    await loadAllLessons();
+    await loadOverview();
+    showPanel('lessons', null);
+  };
+
+  window.regenerateQuestions = function() {
+    document.getElementById('generating-state').style.display = 'block';
+    document.getElementById('generated-output').style.display = 'none';
+    window.generateQuestions();
+  };
+
+  function resetCreateForm() {
+    document.getElementById('steps-1-2').style.display = 'block';
+    document.getElementById('step-3-content').style.display = 'none';
+    document.getElementById('step-4-content').style.display = 'none';
+    document.getElementById('lesson-num-input').value = '';
+    document.getElementById('lesson-title-input').value = '';
+    document.getElementById('lesson-subtitle-input').value = '';
+    document.getElementById('lesson-video-input').value = '';
+    document.getElementById('outline-text').value = '';
+    document.getElementById('generate-btn').disabled = true;
+    setStep(1);
+  }
+
+  // ══════════════════════════════════════
+  // MESSAGES
+  // ══════════════════════════════════════
+  async function loadMessages() {
+    const { data: messages } = await supabase
+      .from('messages')
+      .select('*, profiles(name)')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    const container = document.getElementById('messages-container');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!messages || !messages.length) {
+      container.innerHTML = `<div style="padding:32px;text-align:center;color:var(--muted);font-size:14px;">No messages yet.</div>`;
+      return;
+    }
+
+    messages.forEach(m => {
+      const name = m.profiles?.name || 'A girl';
+      const initials = name.charAt(0).toUpperCase();
+      const date = new Date(m.created_at).toLocaleDateString('en-GB', {day:'numeric',month:'short'});
+      const isUnread = !m.reply;
+      container.innerHTML += `
+        <div class="message-thread" id="thread-${m.id}">
+          <div class="thread-header">
+            <div class="girl-avatar">${initials}</div>
+            <div class="thread-meta">
+              <strong>${name}</strong>
+              <span>${date}${isUnread ? ' · Unread' : ' · Replied'}</span>
+            </div>
+            ${isUnread ? '<div class="unread-badge"></div>' : ''}
+          </div>
+          <div class="message-preview">${m.message}</div>
+          ${m.reply
+            ? `<div style="font-size:13px;color:var(--soft-green);padding:10px 14px;background:rgba(122,158,138,.07);border-radius:8px;"><strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">✅ Your reply:</strong>${m.reply}</div>`
+            : `<div class="reply-area">
+                <textarea class="reply-input" id="reply-input-${m.id}" placeholder="Reply to ${name}..."></textarea>
+                <button class="btn-primary" style="align-self:flex-end;padding:10px 16px;font-size:12px;width:auto;" onclick="sendReply('${m.id}')">Reply →</button>
+              </div>`}
+        </div>`;
+    });
+  }
+
+  window.sendReply = async function(messageId) {
+    const replyText = document.getElementById(`reply-input-${messageId}`)?.value?.trim();
+    if (!replyText) { showToast('Please write a reply first'); return; }
+
+    const { error } = await supabase.from('messages').update({ reply: replyText }).eq('id', messageId);
+    if (error) { showToast('❌ Could not send reply: ' + error.message); return; }
+
+    showToast('💌 Reply sent!');
+    await loadMessages();
+    await loadOverview();
+  };
+
+  // ══════════════════════════════════════
+  // UI HELPERS
+  // ══════════════════════════════════════
+  window.showPanel = function(id, navEl) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + id).classList.add('active');
+    if (navEl) { document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); navEl.classList.add('active'); }
+    const titles = { overview:'Overview', create:'Create New Lesson', lessons:'All Lessons', messages:'Messages from Girls' };
+    document.getElementById('topbar-title').textContent = titles[id] || 'Admin';
+  };
+
+  function setStep(n) {
+    for (let i = 1; i <= 4; i++) {
+      const el = document.getElementById(`step-${i}`);
+      if (!el) continue;
+      el.className = 'step';
+      if (i < n) el.classList.add('done');
+      else if (i === n) el.classList.add('active');
+    }
+  }
+
+  window.showToast = function(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3500);
+  };
+</script>
+<style>
+  :root { --rose:#C4726A; --rose-light:#E8A89E; --rose-dark:#8B4A44; --cream:#FAF6F1; --warm-white:#FDF9F5; --gold:#C9A96E; --charcoal:#2C2420; --muted:#8A7570; --soft-green:#7A9E8A; --lavender:#9B8FB5; --border:rgba(196,114,106,.15); --shadow:0 8px 40px rgba(44,36,32,.08); --shadow-deep:0 20px 60px rgba(44,36,32,.15); }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; background:var(--cream); color:var(--charcoal); min-height:100vh; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .layout { display:flex; min-height:100vh; }
+  .sidebar { width:260px; background:var(--charcoal); display:flex; flex-direction:column; padding:32px 0; position:fixed; height:100vh; overflow-y:auto; z-index:100; }
+  .sidebar-brand { padding:0 24px 28px; border-bottom:1px solid rgba(255,255,255,.07); }
+  .brand-row { display:flex; align-items:center; gap:10px; }
+  .brand-icon { width:36px; height:36px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:16px; }
+  .brand-name { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; color:white; }
+  .brand-name span { color:var(--rose-light); }
+  .admin-chip { margin-top:10px; display:inline-block; background:rgba(196,114,106,.2); color:var(--rose-light); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; padding:4px 10px; border-radius:20px; }
+  .sidebar-coach { padding:20px 24px; border-bottom:1px solid rgba(255,255,255,.07); display:flex; align-items:center; gap:12px; }
+  .coach-avatar { width:42px; height:42px; background:linear-gradient(135deg,var(--rose-light),var(--gold)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'Cormorant Garamond',serif; font-size:18px; font-weight:600; color:white; flex-shrink:0; }
+  .coach-name { font-size:13px; font-weight:600; color:white; }
+  .coach-role { font-size:11px; color:rgba(255,255,255,.4); margin-top:2px; }
+  nav { padding:20px 12px; flex:1; }
+  .nav-label { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:rgba(255,255,255,.3); padding:0 12px; margin-bottom:6px; margin-top:16px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px; cursor:pointer; font-size:13px; color:rgba(255,255,255,.5); margin-bottom:2px; border:none; background:none; width:100%; text-align:left; transition:all .15s; }
+  .nav-item:hover { background:rgba(255,255,255,.06); color:rgba(255,255,255,.85); }
+  .nav-item.active { background:rgba(196,114,106,.2); color:var(--rose-light); font-weight:500; }
+  .nav-icon { font-size:15px; width:20px; text-align:center; }
+  .stats-mini { margin:0 12px 12px; padding:16px; background:rgba(255,255,255,.04); border-radius:12px; border:1px solid rgba(255,255,255,.06); }
+  .stats-mini-row { display:flex; justify-content:space-between; margin-bottom:10px; }
+  .stats-mini-row:last-child { margin-bottom:0; }
+  .stat-mini-label { font-size:11px; color:rgba(255,255,255,.4); }
+  .stat-mini-val { font-size:13px; font-weight:600; color:white; }
+  .logout-btn { margin:0 12px 12px; padding:10px; border:1px solid rgba(255,255,255,.1); border-radius:10px; background:transparent; color:rgba(255,255,255,.4); font-size:12px; cursor:pointer; font-family:'DM Sans',sans-serif; transition:all .2s; }
+  .logout-btn:hover { background:rgba(255,255,255,.06); color:white; }
+  .main { margin-left:260px; flex:1; min-height:100vh; }
+  .topbar { background:var(--warm-white); border-bottom:1px solid var(--border); padding:16px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:50; }
+  .topbar-title { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; }
+  .topbar-actions { display:flex; gap:10px; }
+  .btn-primary { padding:10px 22px; background:linear-gradient(135deg,var(--rose),var(--rose-dark)); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:500; cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px; }
+  .btn-primary:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(196,114,106,.3); }
+  .btn-outline { padding:10px 20px; border:1.5px solid var(--border); border-radius:10px; background:transparent; color:var(--muted); font-family:'DM Sans',sans-serif; font-size:13px; cursor:pointer; transition:all .15s; }
+  .btn-outline:hover { border-color:var(--rose-light); color:var(--rose); }
+  .panel { display:none; padding:36px 40px; animation:fadeIn .3s ease; }
+  .panel.active { display:block; }
+  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:32px; }
+  .stat-card { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; padding:24px; }
+  .stat-icon { font-size:24px; margin-bottom:12px; }
+  .stat-val { font-family:'Cormorant Garamond',serif; font-size:36px; font-weight:600; line-height:1; margin-bottom:4px; }
+  .stat-label { font-size:12px; color:var(--muted); }
+  .section-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+  .section-head h3 { font-family:'Cormorant Garamond',serif; font-size:22px; font-weight:600; }
+  .lessons-table { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; overflow:hidden; margin-bottom:32px; }
+  .table-header { display:grid; grid-template-columns:60px 1fr 120px 100px 100px; padding:14px 24px; background:rgba(196,114,106,.05); border-bottom:1px solid var(--border); font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .table-row { display:grid; grid-template-columns:60px 1fr 120px 100px 100px; padding:18px 24px; border-bottom:1px solid var(--border); align-items:center; transition:background .15s; }
+  .table-row:last-child { border-bottom:none; }
+  .table-row:hover { background:rgba(196,114,106,.03); }
+  .lesson-num { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; color:var(--rose-light); }
+  .lesson-title-cell strong { font-size:14px; font-weight:500; display:block; margin-bottom:3px; }
+  .lesson-title-cell span { font-size:12px; color:var(--muted); }
+  .status-pill { display:inline-flex; align-items:center; gap:5px; padding:5px 12px; border-radius:20px; font-size:11px; font-weight:600; }
+  .status-pill.live { background:rgba(122,158,138,.12); color:var(--soft-green); }
+  .status-pill.draft { background:rgba(201,169,110,.12); color:var(--gold); }
+  .action-btns { display:flex; gap:6px; }
+  .btn-icon { width:30px; height:30px; border:1px solid var(--border); border-radius:8px; background:transparent; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:13px; transition:all .15s; }
+  .btn-icon:hover { border-color:var(--rose-light); background:rgba(196,114,106,.05); }
+  .create-layout { display:grid; grid-template-columns:1fr 1fr; gap:24px; max-width:1100px; }
+  .create-card { background:var(--warm-white); border:1px solid var(--border); border-radius:20px; padding:32px; }
+  .card-head { margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--border); }
+  .card-head h3 { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:600; margin-bottom:4px; }
+  .card-head p { font-size:12px; color:var(--muted); font-weight:300; }
+  .field-group { margin-bottom:18px; }
+  .field-label { font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:8px; display:block; }
+  .field-input { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:var(--cream); outline:none; transition:border-color .2s; }
+  .field-input:focus { border-color:var(--rose-light); }
+  .field-select { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:var(--cream); outline:none; cursor:pointer; }
+  .upload-zone { border:2px dashed rgba(196,114,106,.25); border-radius:14px; padding:36px 24px; text-align:center; cursor:pointer; transition:all .2s; background:rgba(196,114,106,.02); }
+  .upload-zone:hover { border-color:var(--rose-light); background:rgba(196,114,106,.04); }
+  .upload-zone .up-icon { font-size:32px; margin-bottom:10px; }
+  .upload-zone h4 { font-size:14px; font-weight:500; margin-bottom:6px; }
+  .upload-zone p { font-size:12px; color:var(--muted); }
+  .file-types { display:flex; gap:8px; justify-content:center; margin-top:14px; }
+  .file-type-chip { padding:4px 10px; background:rgba(196,114,106,.08); color:var(--rose); border-radius:20px; font-size:11px; font-weight:600; }
+  .ai-gen-btn { width:100%; padding:16px; background:linear-gradient(135deg,rgba(196,114,106,.1),rgba(201,169,110,.1)); border:1.5px solid rgba(196,114,106,.25); border-radius:12px; font-family:'DM Sans',sans-serif; font-size:14px; font-weight:500; color:var(--rose-dark); cursor:pointer; transition:all .2s; display:flex; align-items:center; justify-content:center; gap:10px; }
+  .ai-gen-btn:hover { background:linear-gradient(135deg,rgba(196,114,106,.15),rgba(201,169,110,.15)); border-color:var(--rose-light); }
+  .ai-gen-btn:disabled { opacity:.5; cursor:not-allowed; }
+  .gen-spinner { width:40px; height:40px; border:3px solid rgba(196,114,106,.15); border-top-color:var(--rose); border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 16px; }
+  .gen-label { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:400; margin-bottom:6px; }
+  .gen-sub { font-size:13px; color:var(--muted); }
+  .question-item { background:var(--cream); border:1.5px solid var(--border); border-radius:14px; padding:20px; margin-bottom:12px; transition:border-color .15s; }
+  .question-item:hover { border-color:var(--rose-light); }
+  .question-item-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .q-tag { font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--rose); }
+  .q-actions { display:flex; gap:6px; }
+  .q-edit-btn { font-size:11px; padding:4px 10px; border:1px solid var(--border); border-radius:6px; background:transparent; color:var(--muted); cursor:pointer; font-family:'DM Sans',sans-serif; transition:all .15s; }
+  .q-edit-btn:hover { border-color:var(--rose-light); color:var(--rose); }
+  .q-text-display { font-size:14px; line-height:1.6; }
+  .q-edit-input { width:100%; padding:10px 14px; border:1.5px solid var(--rose-light); border-radius:8px; font-family:'DM Sans',sans-serif; font-size:14px; color:var(--charcoal); background:white; outline:none; display:none; }
+  .rubric-section { margin-top:20px; padding-top:20px; border-top:1px solid var(--border); }
+  .rubric-section h4 { font-size:13px; font-weight:600; margin-bottom:12px; }
+  .rubric-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px; }
+  .rubric-box { padding:14px; border-radius:10px; font-size:12px; line-height:1.6; font-weight:300; }
+  .rubric-box.shallow { background:rgba(196,114,106,.07); border:1px solid rgba(196,114,106,.15); color:var(--rose-dark); }
+  .rubric-box.deep { background:rgba(122,158,138,.07); border:1px solid rgba(122,158,138,.2); color:#3D6B56; }
+  .rubric-box strong { display:block; margin-bottom:4px; font-weight:600; font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+  .steps { display:flex; gap:0; margin-bottom:32px; background:var(--warm-white); border:1px solid var(--border); border-radius:14px; padding:6px; max-width:600px; }
+  .step { flex:1; padding:10px 16px; border-radius:10px; font-size:12px; font-weight:500; color:var(--muted); text-align:center; transition:all .2s; display:flex; align-items:center; justify-content:center; gap:7px; }
+  .step.active { background:var(--rose); color:white; }
+  .step.done { background:rgba(122,158,138,.12); color:var(--soft-green); }
+  .step-num { width:20px; height:20px; border-radius:50%; background:rgba(255,255,255,.25); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; }
+  .step:not(.active):not(.done) .step-num { background:rgba(196,114,106,.1); color:var(--rose-light); }
+  .message-thread { background:var(--warm-white); border:1px solid var(--border); border-radius:18px; padding:24px; margin-bottom:16px; }
+  .thread-header { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+  .girl-avatar { width:38px; height:38px; background:linear-gradient(135deg,var(--rose-light),var(--lavender)); border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'Cormorant Garamond',serif; font-size:16px; font-weight:600; color:white; flex-shrink:0; }
+  .thread-meta { flex:1; }
+  .thread-meta strong { font-size:14px; font-weight:600; display:block; }
+  .thread-meta span { font-size:12px; color:var(--muted); }
+  .unread-badge { width:8px; height:8px; background:var(--rose); border-radius:50%; }
+  .message-preview { font-size:14px; line-height:1.7; color:var(--charcoal); font-weight:300; margin-bottom:16px; padding:14px 18px; background:var(--cream); border-radius:10px; border-left:3px solid var(--rose-light); }
+  .reply-area { display:flex; gap:10px; }
+  .reply-input { flex:1; padding:10px 14px; border:1.5px solid var(--border); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; color:var(--charcoal); background:var(--cream); outline:none; resize:none; transition:border-color .2s; min-height:44px; }
+  .reply-input:focus { border-color:var(--rose-light); }
+  .toast { position:fixed; bottom:32px; right:32px; background:var(--charcoal); color:white; padding:14px 22px; border-radius:12px; font-size:13px; z-index:9999; box-shadow:var(--shadow-deep); transform:translateY(80px); opacity:0; transition:all .3s ease; }
+  .toast.show { transform:translateY(0); opacity:1; }
+
+  /* AUTH OVERLAY */
+  #auth-overlay { position:fixed; inset:0; background:linear-gradient(145deg,#FAF6F1,#EDE0D8); z-index:9999; display:none; align-items:center; justify-content:center; }
+  .auth-card { background:white; border-radius:24px; padding:48px; width:400px; max-width:90vw; box-shadow:0 20px 60px rgba(44,36,32,.15); }
+  .auth-card h2 { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:600; margin-bottom:6px; }
+  .auth-card p { font-size:13px; color:#8A7570; margin-bottom:28px; }
+  .auth-field { margin-bottom:16px; }
+  .auth-field label { font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:#8A7570; margin-bottom:8px; display:block; }
+  .auth-field input { width:100%; padding:13px 16px; border:1.5px solid rgba(196,114,106,.15); border-radius:10px; font-family:'DM Sans',sans-serif; font-size:14px; outline:none; background:#FAF6F1; }
+  .auth-field input:focus { border-color:#E8A89E; }
+  .auth-btn { width:100%; padding:15px; background:linear-gradient(135deg,#C4726A,#8B4A44); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:500; cursor:pointer; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<!-- AUTH OVERLAY -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
+      <div style="width:36px;height:36px;background:linear-gradient(135deg,#C4726A,#8B4A44);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px;">✦</div>
+      <div style="font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600;">Equip<span style="color:#C4726A;">Her</span></div>
+    </div>
+    <h2>Coach Irene</h2>
+    <p>Admin access only. Sign in with your coach account.</p>
+    <div class="auth-field">
+      <label>Email</label>
+      <input type="email" id="admin-email" placeholder="your@email.com" onkeydown="if(event.key==='Enter') adminLogin()">
+    </div>
+    <div class="auth-field">
+      <label>Password</label>
+      <input type="password" id="admin-pass" placeholder="••••••••" onkeydown="if(event.key==='Enter') adminLogin()">
+    </div>
+    <button class="auth-btn" onclick="adminLogin()">Sign In to Admin Panel →</button>
+    <div style="text-align:center;margin-top:16px;font-size:13px;color:#8A7570;">
+      <a href="index.html" style="color:#C4726A;">← Go to Girls' Dashboard</a>
+    </div>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-row">
+        <div class="brand-icon">✦</div>
+        <div class="brand-name">Equip<span>Her</span></div>
+      </div>
+      <div class="admin-chip">Admin Panel</div>
+    </div>
+    <div class="sidebar-coach">
+      <div class="coach-avatar">I</div>
+      <div>
+        <div class="coach-name" id="coach-name-display">Coach Irene</div>
+        <div class="coach-role">Programme Director</div>
+      </div>
+    </div>
+    <nav>
+      <div class="nav-label">Programme</div>
+      <button class="nav-item active" onclick="showPanel('overview',this)"><span class="nav-icon">📊</span> Overview</button>
+      <button class="nav-item" onclick="showPanel('create',this)"><span class="nav-icon">✦</span> Create New Lesson</button>
+      <button class="nav-item" onclick="showPanel('lessons',this)"><span class="nav-icon">📚</span> All Lessons</button>
+      <div class="nav-label">Girls</div>
+      <button class="nav-item" onclick="showPanel('messages',this)"><span class="nav-icon">💌</span> Messages</button>
+    </nav>
+    <div class="stats-mini">
+      <div class="stats-mini-row"><div class="stat-mini-label">Girls enrolled</div><div class="stat-mini-val" id="sidebar-girls">—</div></div>
+      <div class="stats-mini-row"><div class="stat-mini-label">Lessons live</div><div class="stat-mini-val" id="sidebar-lessons">—</div></div>
+      <div class="stats-mini-row"><div class="stat-mini-label">Unread messages</div><div class="stat-mini-val" style="color:var(--rose-light);" id="sidebar-unread">—</div></div>
+    </div>
+    <button class="logout-btn" onclick="adminLogout()">Sign Out</button>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="topbar-title" id="topbar-title">Overview</div>
+      <div class="topbar-actions">
+        <button class="btn-outline" onclick="window.open('index.html','_blank')">👁 View Girls' Dashboard</button>
+        <button class="btn-primary" onclick="showPanel('create',null)">＋ New Lesson</button>
+      </div>
+    </div>
+
+    <!-- OVERVIEW -->
+    <div class="panel active" id="panel-overview">
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-icon">👧</div><div class="stat-val" id="stat-girls">—</div><div class="stat-label">Girls enrolled</div></div>
+        <div class="stat-card"><div class="stat-icon">📚</div><div class="stat-val" id="stat-lessons">—</div><div class="stat-label">Lessons published</div></div>
+        <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-val" id="stat-reflections">—</div><div class="stat-label">Reflections submitted</div></div>
+        <div class="stat-card"><div class="stat-icon" style="color:var(--rose);">💌</div><div class="stat-val" style="color:var(--rose);" id="stat-messages">—</div><div class="stat-label">Unread messages</div></div>
+      </div>
+      <div class="section-head">
+        <h3>Quick Actions</h3>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('create',null)">
+          <div style="font-size:28px;margin-bottom:12px;">✦</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Create New Lesson</div>
+          <div style="font-size:12px;color:var(--muted);">Upload your outline, AI generates questions</div>
+        </div>
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('messages',null)">
+          <div style="font-size:28px;margin-bottom:12px;">💌</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Reply to Messages</div>
+          <div style="font-size:12px;color:var(--muted);">Private messages from girls waiting</div>
+        </div>
+        <div style="background:var(--warm-white);border:1px solid var(--border);border-radius:16px;padding:24px;cursor:pointer;" onclick="showPanel('lessons',null)">
+          <div style="font-size:28px;margin-bottom:12px;">📚</div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;margin-bottom:6px;">Manage Lessons</div>
+          <div style="font-size:12px;color:var(--muted);">Publish, unpublish, and review</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CREATE LESSON -->
+    <div class="panel" id="panel-create">
+      <div class="steps">
+        <div class="step active" id="step-1"><div class="step-num">1</div> Lesson Details</div>
+        <div class="step" id="step-2"><div class="step-num">2</div> Upload Outline</div>
+        <div class="step" id="step-3"><div class="step-num">3</div> Review Questions</div>
+        <div class="step" id="step-4"><div class="step-num">4</div> Publish</div>
+      </div>
+
+      <div id="steps-1-2">
+        <div class="create-layout">
+          <div class="create-card">
+            <div class="card-head"><h3>Lesson Details</h3><p>Basic information about this lesson</p></div>
+            <div class="field-group"><label class="field-label">Lesson Number</label><input type="number" class="field-input" id="lesson-num-input" placeholder="e.g. 14"></div>
+            <div class="field-group"><label class="field-label">Lesson Title</label><input type="text" class="field-input" id="lesson-title-input" placeholder="e.g. Identity Before Intimacy"></div>
+            <div class="field-group"><label class="field-label">Subtitle / Short Description</label><input type="text" class="field-input" id="lesson-subtitle-input" placeholder="e.g. Knowing who you are first"></div>
+            <div class="field-group"><label class="field-label">Video Link (YouTube / Vimeo)</label><input type="url" class="field-input" id="lesson-video-input" placeholder="https://..."></div>
+            <div class="field-group"><label class="field-label">Week / Phase</label>
+              <select class="field-select" id="lesson-phase-select">
+                <option>Week 1–4 (Foundation)</option>
+                <option>Week 5–12 (Identity)</option>
+                <option>Week 13–20 (Relationships)</option>
+                <option>Week 21–36 (Wisdom)</option>
+                <option>Week 37–52 (Readiness)</option>
+              </select>
+            </div>
+            <div class="field-group"><label class="field-label">Challenge Trigger</label>
+              <select class="field-select" id="challenge-trigger">
+                <option>No challenge after this lesson</option>
+                <option>Trigger peer conversation challenge</option>
+                <option>Trigger journaling challenge</option>
+                <option>Trigger family conversation challenge</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="create-card">
+            <div class="card-head"><h3>Upload Lesson Outline</h3><p>Upload your PDF or Word doc — AI reads it and generates questions and rubric</p></div>
+            <div class="upload-zone" id="outline-upload-zone" onclick="document.getElementById('outline-file').click()">
+              <div class="up-icon">📄</div>
+              <h4>Drop your lesson outline here</h4>
+              <p>Coach Irene, upload what you already prepared</p>
+              <div class="file-types">
+                <span class="file-type-chip">PDF</span>
+                <span class="file-type-chip">DOCX</span>
+                <span class="file-type-chip">TXT</span>
+              </div>
+              <input type="file" id="outline-file" style="display:none;" accept=".pdf,.docx,.txt" onchange="handleOutlineUpload(this)">
+            </div>
+            <div style="text-align:center;margin:16px 0;font-size:12px;color:var(--muted);">— or paste your notes directly —</div>
+            <textarea class="field-input" id="outline-text" placeholder="Paste lesson outline, speaker notes, or key points here..." style="min-height:140px;resize:vertical;line-height:1.7;" oninput="checkReadyToGenerate()"></textarea>
+            <div style="margin-top:16px;">
+              <button class="ai-gen-btn" id="generate-btn" onclick="generateQuestions()" disabled>
+                <span>✦</span> Generate Questions & Rubric with AI
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 3 -->
+      <div id="step-3-content" style="display:none;max-width:800px;">
+        <div id="generating-state" style="display:none;text-align:center;padding:48px;">
+          <div class="gen-spinner"></div>
+          <div class="gen-label">Reading your lesson outline...</div>
+          <div class="gen-sub">AI is writing reflection questions and building the feedback rubric</div>
+        </div>
+        <div id="generated-output" style="display:none;" class="create-card">
+          <div class="card-head"><h3>Review Generated Questions</h3><p>Edit any question by clicking the pencil. The AI uses these to give girls personalised feedback.</p></div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;padding:14px 18px;background:rgba(122,158,138,.08);border:1px solid rgba(122,158,138,.2);border-radius:12px;">
+            <span>✅</span><span style="font-size:13px;color:var(--soft-green);font-weight:500;">5 reflection questions generated. Review and edit as needed.</span>
+          </div>
+          <div id="questions-list"></div>
+          <div class="rubric-section">
+            <h4>📋 AI Feedback Rubric</h4>
+            <p style="font-size:12px;color:var(--muted);margin-bottom:14px;font-weight:300;">This guides the AI when giving girls feedback on this lesson.</p>
+            <div id="rubric-output"></div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:24px;">
+            <button class="btn-primary" onclick="approveAndPublish()">✦ Approve & Continue to Publish</button>
+            <button class="btn-outline" onclick="regenerateQuestions()">↻ Regenerate</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 4 -->
+      <div id="step-4-content" style="display:none;max-width:640px;">
+        <div class="create-card">
+          <div class="card-head"><h3>🚀 Ready to Publish</h3><p>Review and choose to publish now or save as draft.</p></div>
+          <div style="background:rgba(122,158,138,.08);border:1px solid rgba(122,158,138,.2);border-radius:14px;padding:20px;margin-bottom:24px;">
+            <div style="font-size:12px;font-weight:600;color:var(--soft-green);letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px;">Lesson Summary</div>
+            <div id="publish-summary" style="font-size:14px;line-height:1.8;"></div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:8px;">
+            <button class="btn-primary" style="padding:14px 28px;" onclick="saveLessonToSupabase(true)">🚀 Publish Now — Girls See It Immediately</button>
+            <button class="btn-outline" onclick="saveLessonToSupabase(false)">💾 Save as Draft</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALL LESSONS -->
+    <div class="panel" id="panel-lessons">
+      <div class="section-head">
+        <h3>All Lessons</h3>
+        <button class="btn-primary" onclick="showPanel('create',null)">＋ New Lesson</button>
+      </div>
+      <div class="lessons-table">
+        <div class="table-header">
+          <div>#</div><div>Lesson Title</div><div>Status</div><div>Reflections</div><div>Actions</div>
+        </div>
+        <div id="lessons-tbody"></div>
+      </div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="panel" id="panel-messages">
+      <div class="section-head">
+        <h3>Messages from Girls</h3>
+        <button class="btn-outline" onclick="loadMessages()">↻ Refresh</button>
+      </div>
+      <div id="messages-container" style="max-width:760px;"></div>
+    </div>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+</body>
+</html>
