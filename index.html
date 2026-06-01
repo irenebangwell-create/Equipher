@@ -70,9 +70,9 @@
     if (!name || !email || !pass) { showToast('Please fill in all fields'); return; }
     if (pass.length < 6) { showToast('Password must be at least 6 characters'); return; }
 
-    setLoading('reg-btn', true);
+    setLoading('reg-btn', true, 'Create My Account →');
     const { data, error } = await supabase.auth.signUp({ email, password: pass });
-    setLoading('reg-btn', false);
+    setLoading('reg-btn', false, 'Create My Account →');
 
     if (error) { showToast('❌ ' + error.message); return; }
 
@@ -605,11 +605,12 @@ YOUR ROLE: Give warm, affirming, personalised feedback like a wise older sister.
     document.getElementById('char-count').textContent = el.value.length + ' characters';
   };
 
-  function setLoading(btnId, loading) {
+  function setLoading(btnId, loading, label) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
     btn.disabled = loading;
-    btn.textContent = loading ? 'Please wait...' : btn.dataset.label;
+    if (loading) btn.textContent = 'Please wait...';
+    else if (label) btn.textContent = label;
   }
 
   window.showModal = function(id) { document.getElementById(id).classList.add('open'); };
